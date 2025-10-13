@@ -55,19 +55,23 @@ class AdminUserController extends Controller
      */
     public function store(Request $request)
     {
-        $validator = Validator::make($request->all(), [
+        $rules = [
             'nom'       => 'required|string|max:255',
             'prenom'    => 'required|string|max:255',
             'email'     => 'required|email|max:255|unique:users,email',
             'telephone' => 'nullable|string|max:20|unique:users,telephone',
             'password'  => 'required|string|min:8',
-            // CORRECTION: Accepter les fichiers images
-            'photo'     => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120', // 5 Mo
             'statut'    => ['nullable', Rule::in(['actif', 'inactif'])],
-            // CORRECTION: Utiliser role_id au lieu de roles (array)
-            'role_id'   => 'required|integer|exists:roles,id'
-        ]);
+            'role_id'   => 'required|integer|exists:roles,id',
+        ];
+        $messages = [
+            'photo.max'   => 'La photo ne doit pas dépasser 5120 kilo-octets (~5 Mo).',
+            'photo.image' => 'Le fichier doit être une image.',
+            'photo.mimes' => 'Formats autorisés : jpg, jpeg, png, gif, webp.',
+        ];
 
+        $validator = Validator::make($request->all(), $rules, $messages);
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
@@ -75,27 +79,26 @@ class AdminUserController extends Controller
                 'errors'  => $validator->errors()
             ], 422);
         }
-
         $data = $validator->validated();
 
-        // Gérer l'upload de la photo
+        // Upload photo (optionnel)
         $photoPath = null;
         if ($request->hasFile('photo')) {
             $photoPath = $request->file('photo')->store('photos', 'public');
         }
 
         $user = User::create([
-            'nom'          => $data['nom'],
-            'prenom'       => $data['prenom'],
-            'email'        => $data['email'],
-            'telephone'    => $data['telephone'] ?? null,
-            'photo'        => $photoPath, // Utiliser 'photo' au lieu de 'photo_profil'
-            'statut'       => $data['statut'] ?? 'actif',
-            'password'     => Hash::make($data['password']),
+            'nom'       => $data['nom'],
+            'prenom'    => $data['prenom'],
+            'email'     => $data['email'],
+            'telephone' => $data['telephone'] ?? null,
+            'photo'     => $photoPath,
+            'statut'    => $data['statut'] ?? 'actif',
+            'password'  => Hash::make($data['password']),
         ]);
 
-        // Attacher le rôle par ID
-        $user->roles()->attach($data['role_id']);
+        // Rôle principal
+        $user->roles()->sync([$data['role_id']]);
 
         return response()->json([
             'success' => true,
@@ -132,7 +135,6 @@ class AdminUserController extends Controller
     public function update(Request $request, $id)
     {
         $user = User::find($id);
-
         if (!$user) {
             return response()->json([
                 'success' => false,
@@ -140,34 +142,39 @@ class AdminUserController extends Controller
             ], 404);
         }
 
-        // CORRECTION: Gestion spéciale pour les requêtes avec fichiers
-        $hasFile = $request->hasFile('photo');
-        
-        if ($hasFile) {
-            // Si il y a un fichier, validation spécifique
-            $validator = Validator::make($request->all(), [
+        // Si un fichier est présent, on exige certaines règles "required",
+        // sinon on rend tout "sometimes".
+        if ($request->hasFile('photo')) {
+            $rules = [
                 'nom'       => 'required|string|max:255',
                 'prenom'    => 'required|string|max:255',
-                'telephone' => ['nullable','string','max:20', Rule::unique('users','telephone')->ignore($user->id)],
+                'telephone' => ['nullable', 'string', 'max:20', Rule::unique('users','telephone')->ignore($user->id)],
                 'email'     => ['required','email','max:255', Rule::unique('users','email')->ignore($user->id)],
                 'statut'    => ['required', Rule::in(['actif', 'inactif'])],
-                'photo'     => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
                 'password'  => 'nullable|string|min:8',
-                'role_id'   => 'required|integer|exists:roles,id'
-            ]);
+                'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120',
+                'role_id'   => 'required|integer|exists:roles,id',
+            ];
         } else {
-            // Si pas de fichier, validation normale
-            $validator = Validator::make($request->all(), [
+            $rules = [
                 'nom'       => 'sometimes|string|max:255',
                 'prenom'    => 'sometimes|string|max:255',
                 'telephone' => ['sometimes','nullable','string','max:20', Rule::unique('users','telephone')->ignore($user->id)],
                 'email'     => ['sometimes','email','max:255', Rule::unique('users','email')->ignore($user->id)],
                 'statut'    => ['sometimes', Rule::in(['actif', 'inactif'])],
                 'password'  => 'sometimes|nullable|string|min:8',
-                'role_id'   => 'sometimes|integer|exists:roles,id'
-            ]);
+                'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120',
+                'role_id'   => 'sometimes|integer|exists:roles,id',
+            ];
         }
 
+        $messages = [
+            'photo.max'   => 'La photo ne doit pas dépasser 5120 kilo-octets (~5 Mo).',
+            'photo.image' => 'Le fichier doit être une image.',
+            'photo.mimes' => 'Formats autorisés : jpg, jpeg, png, gif, webp.',
+        ];
+
+        $validator = Validator::make($request->all(), $rules, $messages);
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
@@ -175,40 +182,35 @@ class AdminUserController extends Controller
                 'errors'  => $validator->errors()
             ], 422);
         }
-
         $data = $validator->validated();
 
-        // Gérer le mot de passe
+        // Mot de passe (seulement si fourni)
         if (array_key_exists('password', $data) && !empty($data['password'])) {
             $data['password'] = Hash::make($data['password']);
         } else {
             unset($data['password']);
         }
 
-        // Gérer l'upload de la photo
-        if ($hasFile) {
-            // Supprimer l'ancienne photo si elle existe
+        // Photo
+        if ($request->hasFile('photo')) {
+            // Supprimer l’ancienne si elle existe
             if ($user->photo && Storage::disk('public')->exists($user->photo)) {
                 Storage::disk('public')->delete($user->photo);
             }
-            
-            // Stocker la nouvelle photo
-            $photoPath = $request->file('photo')->store('photos', 'public');
-            $data['photo'] = $photoPath;
-        }
-        
-        // Retirer photo du data si pas de fichier pour éviter les erreurs
-        if (!$hasFile && array_key_exists('photo', $data)) {
+            $data['photo'] = $request->file('photo')->store('photos', 'public');
+        } else {
+            // si on n’envoie pas de fichier, ne pas toucher à la photo
             unset($data['photo']);
         }
-
-        $user->update($data);
 
         // Mettre à jour le rôle si fourni
         if (array_key_exists('role_id', $data)) {
             $user->roles()->sync([$data['role_id']]);
-            unset($data['role_id']); // Éviter de l'inclure dans la mise à jour du user
+            unset($data['role_id']); // pas un champ de la table users
         }
+
+        // Mise à jour des autres champs
+        $user->update($data);
 
         return response()->json([
             'success' => true,
@@ -309,7 +311,7 @@ class AdminUserController extends Controller
     }
 
     /**
-     * Synchroniser les rôles d'un utilisateur
+     * Synchroniser le rôle principal d'un utilisateur
      * POST /users/{id}/roles  { "role_id": 2 }
      */
     public function syncRoles(Request $request, $id)

@@ -8,6 +8,7 @@ use App\Models\Role;
 use App\Models\Candidat;
 use App\Models\Entreprise;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 
@@ -22,6 +23,7 @@ class AuthController extends Controller
         if ($request->has('confirmPassword')) {
             $request->merge(['password_confirmation' => $request->input('confirmPassword')]);
         }
+
         $validator = Validator::make($request->all(), [
             'nom'             => 'required|string|max:255',
             'prenom'          => 'required|string|max:255',
@@ -36,6 +38,8 @@ class AuthController extends Controller
             'niveau_etude'    => 'required|string',
             'disponibilite'   => 'required|string',
             'pays_id'         => 'required|exists:pays,id',
+            // Optionnel : rôle(s) en clair (ex: "candidat")
+            'roles'           => 'sometimes',
         ]);
 
         if ($validator->fails()) {
@@ -44,41 +48,46 @@ class AuthController extends Controller
             ], 422);
         }
 
-        $user = User::create([
-            'nom'       => $request->nom,
-            'prenom'    => $request->prenom,
-            'email'     => $request->email,
-            'telephone' => $request->telephone,
-            'password'  => Hash::make($request->password),
-            'statut'    => 'actif',
-        ]);
+        $user = DB::transaction(function () use ($request) {
+            $user = User::create([
+                'nom'       => $request->nom,
+                'prenom'    => $request->prenom,
+                'email'     => $request->email,
+                'telephone' => $request->telephone,
+                'password'  => Hash::make($request->password),
+                'statut'    => 'actif',
+            ]);
 
-        // Rôle candidat
-        if ($role = Role::where('nom', 'candidat')->first()) {
-            $user->roles()->attach($role->id);
-        }
+            // Rôle (tolère string "Candidat" ou rien -> par défaut 'candidat')
+            $roleIds = $this->resolveRoleIdsFromInput($request, ['candidat']);
+            if (!empty($roleIds)) {
+                $user->roles()->sync($roleIds);
+            }
 
-        // Profil candidat
-        Candidat::create([
-            'user_id'        => $user->id,
-            'sexe'           => $request->sexe,
-            'date_naissance' => $request->date_naissance,
-            'categorie_id'   => $request->categorie_id,
-            'ville'          => $request->ville,
-            'niveau_etude'   => $request->niveau_etude,
-            'disponibilite'  => $request->disponibilite,
-            'pays_id'        => $request->pays_id,
-        ]);
+            // Profil candidat
+            Candidat::create([
+                'user_id'        => $user->id,
+                'sexe'           => $request->sexe,
+                'date_naissance' => $request->date_naissance,
+                'categorie_id'   => $request->categorie_id,
+                'ville'          => $request->ville,
+                'niveau_etude'   => $request->niveau_etude,
+                'disponibilite'  => $request->disponibilite,
+                'pays_id'        => $request->pays_id,
+            ]);
+
+            // Recharge la relation pour exposer roles + accessors role/role_id
+            return $user->load('roles:id,nom');
+        });
 
         $token = $user->createToken('auth_token')->plainTextToken;
-        $roles = $user->roles()->pluck('nom'); // tableau simple côté front
 
         return response()->json([
             'success' => true,
             'message' => 'Candidat créé avec succès',
             'data'    => [
-                'user'       => $user->load('roles'),
-                'roles'      => $roles,
+                'user'       => $user,
+                'roles'      => $user->roles->pluck('nom')->values(),
                 'token'      => $token,
                 'token_type' => 'Bearer',
             ]
@@ -91,8 +100,9 @@ class AuthController extends Controller
     public function registerRecruteur(Request $request)
     {
         if ($request->has('confirmPassword')) {
-        $request->merge(['password_confirmation' => $request->input('confirmPassword')]);
+            $request->merge(['password_confirmation' => $request->input('confirmPassword')]);
         }
+
         $validator = Validator::make($request->all(), [
             'nom'              => 'required|string|max:255',
             'prenom'           => 'required|string|max:255',
@@ -105,6 +115,8 @@ class AuthController extends Controller
             'pays_id'          => 'required|exists:pays,id',
             'description'      => 'nullable|string',
             'site_web'         => 'nullable|url',
+            // Optionnel : rôle(s) en clair (ex: "recruteur")
+            'roles'            => 'sometimes',
         ]);
 
         if ($validator->fails()) {
@@ -113,39 +125,45 @@ class AuthController extends Controller
             ], 422);
         }
 
-        $user = User::create([
-            'nom'       => $request->nom,
-            'prenom'    => $request->prenom,
-            'email'     => $request->email,
-            'telephone' => $request->telephone,
-            'password'  => Hash::make($request->password),
-            'statut'    => 'actif',
-        ]);
+        $user = DB::transaction(function () use ($request) {
+            $user = User::create([
+                'nom'       => $request->nom,
+                'prenom'    => $request->prenom,
+                'email'     => $request->email,
+                'telephone' => $request->telephone,
+                'password'  => Hash::make($request->password),
+                'statut'    => 'actif',
+            ]);
 
-        if ($role = Role::where('nom', 'recruteur')->first()) {
-            $user->roles()->attach($role->id);
-        }
+            // Rôle (tolère string "Recruteur" ou défaut 'recruteur')
+            $roleIds = $this->resolveRoleIdsFromInput($request, ['recruteur']);
+            if (!empty($roleIds)) {
+                $user->roles()->sync($roleIds);
+            }
 
-        Entreprise::create([
-            'user_id'         => $user->id,
-            'nom_entreprise'  => $request->nom_entreprise,
-            'secteur_activite'=> $request->secteur_activite,
-            'description'     => $request->description,
-            'site_web'        => $request->site_web,
-            'logo'            => null,
-            'pays_id'         => $request->pays_id,
-            'statut'          => 'en attente', // devra être validée par un admin
-        ]);
+            // Fiche entreprise
+            Entreprise::create([
+                'user_id'          => $user->id,
+                'nom_entreprise'   => $request->nom_entreprise,
+                'secteur_activite' => $request->secteur_activite,
+                'description'      => $request->description,
+                'site_web'         => $request->site_web,
+                'logo'             => null,
+                'pays_id'          => $request->pays_id,
+                'statut'           => 'en attente', // sera validée par un admin
+            ]);
+
+            return $user->load('roles:id,nom');
+        });
 
         $token = $user->createToken('auth_token')->plainTextToken;
-        $roles = $user->roles()->pluck('nom');
 
         return response()->json([
             'success' => true,
             'message' => 'Recruteur créé avec succès',
             'data'    => [
-                'user'       => $user->load('roles'),
-                'roles'      => $roles,
+                'user'       => $user,
+                'roles'      => $user->roles->pluck('nom')->values(),
                 'token'      => $token,
                 'token_type' => 'Bearer',
             ]
@@ -188,7 +206,7 @@ class AuthController extends Controller
 
         // Cas particulier recruteur : entreprise non validée → blocage
         if ($user->hasRole('recruteur')) {
-            $entreprise = $user->entreprise ?? null; // relation à adapter si besoin
+            $entreprise = $user->entreprise ?? null;
             if (!$entreprise || $entreprise->statut !== 'valide') {
                 return response()->json([
                     'success' => false,
@@ -197,19 +215,24 @@ class AuthController extends Controller
             }
         }
 
-        $token = $user->createToken('auth_token')->plainTextToken;
-        $roles = $user->roles()->pluck('nom');
+        // ✅ Mettre à jour la dernière connexion
+        $user->update([
+            'last_login' => now()
+        ]);
 
-        // Plus de redirect_url ici → le front redirige vers /dashboard
+        $token = $user->createToken('auth_token')->plainTextToken;
+
+        // Charger les rôles pour exposer 'roles', 'role', 'role_id'
+        $user->load('roles:id,nom');
+
+        // Réponse alignée avec le front: token + user en racine
         return response()->json([
-            'success' => true,
-            'message' => 'Connexion réussie',
-            'data'    => [
-                'user'       => $user->load('roles'),
-                'roles'      => $roles,
-                'token'      => $token,
-                'token_type' => 'Bearer',
-            ]
+            'success'    => true,
+            'message'    => 'Connexion réussie',
+            'token'      => $token,
+            'token_type' => 'Bearer',
+            'user'       => $user,
+            'roles'      => $user->roles->pluck('nom')->values(),
         ]);
     }
 
@@ -231,42 +254,56 @@ class AuthController extends Controller
      */
     public function me(Request $request)
     {
-        $user  = $request->user()->load('roles');
-        $roles = $user->roles->pluck('nom');
+        $user = $request->user()->load('roles:id,nom');
 
         return response()->json([
             'success' => true,
             'data'    => [
-                'user'  => $user,
-                'roles' => $roles,
+                'user'  => $user,                               // contient 'role' et 'role_id'
+                'roles' => $user->roles->pluck('nom')->values(), // ex: ["Administrateur"]
             ]
         ]);
     }
 
     /**
-     * (Optionnel) Métadonnées pour le dashboard unique (le front affiche/masque selon rôles)
+     * (Optionnel) Métadonnées pour le dashboard unique
      */
     public function dashboard(Request $request)
     {
-        $user  = $request->user();
-        $roles = $user->roles()->pluck('nom');
+        $user  = $request->user()->load('roles:id,nom');
+        $roles = $user->roles->pluck('nom');
 
-        // Exemples de flags utilisés côté front pour cacher/afficher des tuiles
         $flags = [
-            'can_manage_users'     => $roles->contains('admin'),
-            'can_manage_entreprises'=> $roles->contains('admin'),
-            'can_manage_offres'    => $roles->contains('admin') || $roles->contains('recruteur'),
-            'can_apply'            => $roles->contains('candidat'),
+            'can_manage_users'       => $roles->contains('Administrateur'),
+            'can_manage_entreprises' => $roles->contains('Administrateur'),
+            'can_manage_offres'      => $roles->contains('Administrateur') || $roles->contains('Recruteur'),
+            'can_apply'              => $roles->contains('Candidat'),
         ];
 
         return response()->json([
             'success' => true,
             'data'    => [
-                'user'   => $user->load('roles'),
-                'roles'  => $roles,
+                'user'   => $user,
+                'roles'  => $roles->values(),
                 'flags'  => $flags,
-                // le front va de toute façon sur /dashboard (unique)
             ]
         ]);
+    }
+
+    /**
+     * Mappe "roles" depuis l'input (string ou array) vers les IDs en base.
+     * Exemple: "Administrateur" -> [id]. $default est utilisé si rien n'est fourni.
+     */
+    private function resolveRoleIdsFromInput(Request $request, array $default = []): array
+    {
+        $input = $request->input('roles', $default); // "Administrateur" ou ["Administrateur"]
+        $names = is_array($input) ? $input : [$input];
+
+        $lc = collect($names)
+            ->filter()
+            ->map(fn($r) => mb_strtolower(trim((string)$r)));
+
+        // Requête case-insensitive sur la colonne nom
+        return Role::whereIn(DB::raw('LOWER(nom)'), $lc)->pluck('id')->all();
     }
 }

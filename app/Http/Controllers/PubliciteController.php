@@ -477,4 +477,31 @@ class PubliciteController extends Controller
     ]);
 }
 
+public function getMesPublicites(Request $request)
+{
+    $user = $request->user();
+    
+    // Log pour déboguer
+    \Log::info('getMesPublicites appelé par user:', [
+        'user_id' => $user->id,
+        'user_role' => $user->roles->pluck('nom')
+    ]);
+    
+    // Filtrer les publicités par entreprise du recruteur
+    // Vous devez adapter selon votre structure de données
+    $publicites = Publicite::with(['entreprise'])
+        ->whereHas('entreprise', function($query) use ($user) {
+            $query->where('user_id', $user->id);
+        })
+        ->orderBy('created_at', 'desc')
+        ->paginate(15);
+    
+    \Log::info('Nombre de publicités trouvées:', ['count' => $publicites->total()]);
+    
+    return response()->json([
+        'success' => true,
+        'data' => $publicites
+    ]);
+}
+
 }

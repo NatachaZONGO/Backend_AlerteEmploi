@@ -2,158 +2,211 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 class RoleController extends Controller
 {
-    /**
-     * Lister tous les rôles
-     */
+    // ========================= CRUD RÔLES =========================
+
+    /** GET /api/roles */
     public function index()
     {
+        $roles = Role::withCount('users')->orderBy('nom')->get();
+
         return response()->json([
             'success' => true,
-            'data' => Role::orderBy('nom')->get()
+            'data'    => $roles,
         ]);
     }
 
-    /**
-     * Créer un rôle
-     */
+    /** POST /api/roles */
     public function store(Request $request)
     {
-        $v = Validator::make($request->all(), [
-            'nom' => 'required|string|max:100|unique:roles,nom',
-            'description' => 'nullable|string|max:255'
+        $validated = $request->validate([
+            'nom'         => ['required','string','max:100','unique:roles,nom'],
+            'description' => ['nullable','string','max:255'],
         ]);
 
-        if ($v->fails()) {
-            return response()->json(['success'=>false, 'errors'=>$v->errors()], 422);
-        }
-
-        $role = Role::create($v->validated());
+        $role = Role::create($validated);
 
         return response()->json([
             'success' => true,
             'message' => 'Rôle créé avec succès',
-            'data' => $role
+            'data'    => $role,
         ], 201);
     }
 
-    /**
-     * Afficher un rôle
-     */
+    /** GET /api/roles/{id} */
     public function show($id)
     {
-        $role = Role::find($id);
+        $role = Role::withCount('users')->find($id);
         if (!$role) {
-            return response()->json(['success'=>false,'message'=>'Rôle introuvable'],404);
+            return response()->json(['success'=>false,'message'=>'Rôle introuvable'], 404);
         }
+
         return response()->json(['success'=>true,'data'=>$role]);
     }
 
-    /**
-     * Mettre à jour un rôle
-     */
+    /** PUT /api/roles/{id} */
     public function update(Request $request, $id)
     {
         $role = Role::find($id);
         if (!$role) {
-            return response()->json(['success'=>false,'message'=>'Rôle introuvable'],404);
+            return response()->json(['success'=>false,'message'=>'Rôle introuvable'], 404);
         }
 
-        $v = Validator::make($request->all(), [
-            'nom' => 'sometimes|string|max:100|unique:roles,nom,'.$id,
-            'description' => 'sometimes|nullable|string|max:255'
+        $validated = $request->validate([
+            'nom'         => ['sometimes','string','max:100', Rule::unique('roles','nom')->ignore($id)],
+            'description' => ['sometimes','nullable','string','max:255'],
         ]);
 
-        if ($v->fails()) {
-            return response()->json(['success'=>false,'errors'=>$v->errors()],422);
-        }
-
-        $role->update($v->validated());
+        $role->update($validated);
 
         return response()->json([
             'success' => true,
-            'message' => 'Rôle mis à jour',
-            'data' => $role
+            'message' => 'Rôle mis à jour avec succès',
+            'data'    => $role,
         ]);
     }
 
-    /**
-     * Supprimer un rôle
-     */
+    /** DELETE /api/roles/{id} */
     public function destroy($id)
     {
         $role = Role::find($id);
         if (!$role) {
-            return response()->json(['success'=>false,'message'=>'Rôle introuvable'],404);
+            return response()->json(['success'=>false,'message'=>'Rôle introuvable'], 404);
+        }
+
+        if ($role->users()->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Impossible de supprimer un rôle déjà attribué à des utilisateurs.'
+            ], 422);
         }
 
         $role->delete();
-        return response()->json(['success'=>true,'message'=>'Rôle supprimé']);
-    }
 
-    // ================== Gestion des rôles pour les utilisateurs ==================
-
-    /**
-     * Remplacer tous les rôles d’un utilisateur
-     */
-    public function syncUserRoles(Request $request, $userId)
-    {
-        $request->validate([
-            'roles' => 'required|array|min:1',
-            'roles.*' => 'string|exists:roles,nom'
+        return response()->json([
+            'success' => true,
+            'message' => 'Rôle supprimé avec succès'
         ]);
-
-        $user = User::find($userId);
-        if (!$user) return response()->json(['success'=>false,'message'=>'Utilisateur introuvable'],404);
-
-        $roleIds = Role::whereIn('nom',$request->roles)->pluck('id')->all();
-        $user->roles()->sync($roleIds);
-
-        return response()->json(['success'=>true,'message'=>'Rôles synchronisés','data'=>$user->load('roles')]);
     }
 
+    // ==================== GESTION DES RÔLES UTILISATEUR ====================
+
     /**
-     * Ajouter des rôles à un utilisateur
+     * POST /api/users/{userId}/roles/attach
+     * Body: { "roles": ["Administrateur","recruteur"] } ou { "role_ids": [1,2] }
      */
     public function attachUserRoles(Request $request, $userId)
     {
-        $request->validate([
-            'roles' => 'required|array|min:1',
-            'roles.*' => 'string|exists:roles,nom'
-        ]);
-
         $user = User::find($userId);
-        if (!$user) return response()->json(['success'=>false,'message'=>'Utilisateur introuvable'],404);
+        if (!$user) return response()->json(['success'=>false,'message'=>'Utilisateur introuvable'], 404);
 
-        $roleIds = Role::whereIn('nom',$request->roles)->pluck('id')->all();
+        $roleIds = $this->resolveRoleIds($request);
+        if (empty($roleIds)) {
+            return response()->json(['success'=>false,'message'=>'Aucun rôle valide fourni'], 422);
+        }
+
         $user->roles()->syncWithoutDetaching($roleIds);
+        $user->load('roles:id,nom');
 
-        return response()->json(['success'=>true,'message'=>'Rôles ajoutés','data'=>$user->load('roles')]);
+        return response()->json([
+            'success' => true,
+            'message' => 'Rôles ajoutés',
+            'data'    => [
+                'user'  => $user,
+                'roles' => $user->roles->pluck('nom')->values(),
+            ]
+        ]);
     }
 
     /**
-     * Retirer des rôles à un utilisateur
+     * POST /api/users/{userId}/roles/detach
+     * Body: { "roles": ["Administrateur"] } ou { "role_ids": [1] }
      */
     public function detachUserRoles(Request $request, $userId)
     {
-        $request->validate([
-            'roles' => 'required|array|min:1',
-            'roles.*' => 'string|exists:roles,nom'
-        ]);
-
         $user = User::find($userId);
-        if (!$user) return response()->json(['success'=>false,'message'=>'Utilisateur introuvable'],404);
+        if (!$user) return response()->json(['success'=>false,'message'=>'Utilisateur introuvable'], 404);
 
-        $roleIds = Role::whereIn('nom',$request->roles)->pluck('id')->all();
+        $roleIds = $this->resolveRoleIds($request);
+        if (empty($roleIds)) {
+            return response()->json(['success'=>false,'message'=>'Aucun rôle valide fourni'], 422);
+        }
+
         $user->roles()->detach($roleIds);
+        $user->load('roles:id,nom');
 
-        return response()->json(['success'=>true,'message'=>'Rôles retirés','data'=>$user->load('roles')]);
+        return response()->json([
+            'success' => true,
+            'message' => 'Rôles retirés',
+            'data'    => [
+                'user'  => $user,
+                'roles' => $user->roles->pluck('nom')->values(),
+            ]
+        ]);
+    }
+
+    /**
+     * POST /api/users/{userId}/roles/sync
+     * Body: { "roles": ["candidat"] } ou { "role_ids": [3] }
+     */
+    public function syncUserRoles(Request $request, $userId)
+    {
+        $user = User::find($userId);
+        if (!$user) return response()->json(['success'=>false,'message'=>'Utilisateur introuvable'], 404);
+
+        $roleIds = $this->resolveRoleIds($request);
+        if (empty($roleIds)) {
+            return response()->json(['success'=>false,'message'=>'Aucun rôle valide fourni'], 422);
+        }
+
+        DB::transaction(fn() => $user->roles()->sync($roleIds));
+
+        $user->load('roles:id,nom');
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Rôles synchronisés',
+            'data'    => [
+                'user'  => $user,
+                'roles' => $user->roles->pluck('nom')->values(),
+            ]
+        ]);
+    }
+
+    // ============================ HELPERS ============================
+
+    /**
+     * Retourne des ids de rôles depuis:
+     * - role_ids: [1,2]  (prioritaire)
+     * - roles: ["Administrateur","recruteur"] (case-insensitive)
+     */
+    private function resolveRoleIds(Request $request): array
+    {
+        // 1) ids directs
+        $ids = collect($request->input('role_ids', []))
+            ->filter(fn($v) => is_numeric($v))
+            ->map(fn($v) => (int) $v)
+            ->values()
+            ->all();
+
+        if (!empty($ids)) {
+            return Role::whereIn('id', $ids)->pluck('id')->all();
+        }
+
+        // 2) noms (insensible à la casse, espaces tolérés)
+        $names = $request->input('roles', []);
+        $names = is_array($names) ? $names : [$names];
+
+        $lc = collect($names)->filter()->map(fn($r) => mb_strtolower(trim((string) $r)));
+        if ($lc->isEmpty()) return [];
+
+        return Role::whereIn(DB::raw('LOWER(nom)'), $lc)->pluck('id')->all();
     }
 }

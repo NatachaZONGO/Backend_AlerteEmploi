@@ -18,6 +18,9 @@ class User extends Authenticatable implements MustVerifyEmail
 {
     use HasApiTokens, HasFactory, Notifiable;
 
+    /** On expose un rôle “principal” dérivé de la relation roles */
+    protected $appends = ['role', 'role_id'];
+
     protected $fillable = [
         'nom',
         'prenom',
@@ -26,6 +29,7 @@ class User extends Authenticatable implements MustVerifyEmail
         'password',
         'photo',
         'statut',
+        'last_login',
     ];
 
     protected $hidden = [
@@ -38,6 +42,7 @@ class User extends Authenticatable implements MustVerifyEmail
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'last_login' => 'datetime',
         ];
     }
 
@@ -45,12 +50,37 @@ class User extends Authenticatable implements MustVerifyEmail
 
     public function roles(): BelongsToMany
     {
-        return $this->belongsToMany(Role::class, 'role_user');
+        // ⚠️ Assure-toi que la table pivot s’appelle bien `role_user`
+        // et qu’elle a les colonnes `user_id` et `role_id`.
+        // Si ta table est différente (ex: roles_users), adapte les 2e/3e/4e paramètres :
+        // return $this->belongsToMany(Role::class, 'roles_users', 'user_id', 'role_id');
+        return $this->belongsToMany(Role::class, 'role_user', 'user_id', 'role_id');
     }
 
     public function hasRole(string $role): bool
     {
         return $this->roles()->where('nom', $role)->exists();
+    }
+
+    /** Accessor: rôle principal (1er rôle lié) */
+    public function getRoleAttribute(): ?string
+    {
+        // Si la relation n’est pas chargée, on évite une requête en cascade
+        $role = $this->relationLoaded('roles')
+            ? $this->roles->first()
+            : $this->roles()->first();
+
+        return $role?->nom;
+    }
+
+    /** Accessor: id du rôle principal (1er rôle lié) */
+    public function getRoleIdAttribute(): ?int
+    {
+        $role = $this->relationLoaded('roles')
+            ? $this->roles->first()
+            : $this->roles()->first();
+
+        return $role?->id;
     }
 
     // ================== PROFILS ==================
@@ -72,12 +102,6 @@ class User extends Authenticatable implements MustVerifyEmail
     }
 
     // ================== NOTIFICATIONS ==================
-    /**
-     * Notifications MÉTIER (in-app) via table pivot `notification_users`.
-     * Remplace la relation `notifications()` créée par le trait Notifiable.
-     * Si tu utilises aussi les notifications Laravel par défaut,
-     * utilise l'alias `laravelNotifications()` ci-dessous.
-     */
     public function notifications(): BelongsToMany
     {
         return $this->belongsToMany(Notification::class, 'notification_users')
@@ -95,24 +119,17 @@ class User extends Authenticatable implements MustVerifyEmail
                 'nombre_ouvertures',
                 'temps_lecture_seconde',
                 'action_effectuee',
+                
             ])
             ->withTimestamps();
     }
 
-    /**
-     * Alias pour les notifications Laravel par défaut (Database Notifications),
-     * afin d’éviter tout conflit de nom avec `notifications()` ci-dessus.
-     * Utilisable si tu en as besoin ailleurs dans l’app.
-     */
     public function laravelNotifications(): MorphMany
     {
         return $this->morphMany(DatabaseNotification::class, 'notifiable')
             ->orderBy('created_at', 'desc');
     }
 
-    /**
-     * Notifications créées par cet utilisateur (auteur côté admin/backoffice).
-     */
     public function notificationsCreees(): HasMany
     {
         return $this->hasMany(Notification::class, 'auteur_id');

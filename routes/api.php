@@ -21,60 +21,57 @@ use App\Http\Controllers\ConseilController;
 use App\Http\Controllers\PubliciteController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\RoleController;
+use App\Http\Controllers\MonEntrepriseController;
 
-// ============================================================================
-// AUTH (public + protégé)
-// ============================================================================
-Route::post('/register-candidat',  [AuthController::class, 'registerCandidat']);
-Route::post('/register-recruteur', [AuthController::class, 'registerRecruteur']);
+// ===================== AUTH =====================
+Route::prefix('auth')->group(function () {
+    Route::post('/register-candidat',  [AuthController::class, 'registerCandidat']);
+    Route::post('/register-recruteur', [AuthController::class, 'registerRecruteur']);
+    Route::post('/login',              [AuthController::class, 'login']);
+    Route::middleware('auth:sanctum')->post('/logout', [AuthController::class, 'logout']);
 
-Route::post('/login',  [AuthController::class, 'login']);
-Route::middleware('auth:sanctum')->post('/logout', [AuthController::class, 'logout']);
-
-Route::middleware('auth:sanctum')->group(function () {
-    Route::get('/me',        [AuthController::class, 'me']);        // infos utilisateur + rôles
-    Route::get('/dashboard', [AuthController::class, 'dashboard']); // flags selon rôle
+    Route::middleware('auth:sanctum')->group(function () {
+        Route::get('/me',        [AuthController::class, 'me']);
+        Route::get('/dashboard', [AuthController::class, 'dashboard']);
+    });
 });
 
-// ============================================================================
-// PROFIL UTILISATEUR (protégé)
-// ============================================================================
+
+// ===================== PROFILE =====================
 Route::middleware('auth:sanctum')->prefix('profile')->group(function () {
-    Route::get('/',            [UserProfileController::class, 'show']);             // Afficher le profil
-    Route::put('/details',     [UserProfileController::class, 'updateBasicInfo']);  // Mettre à jour les informations de base
-    Route::put('/password',    [UserProfileController::class, 'changePassword']);   // Changer mot de passe
+    Route::get('/',            [UserProfileController::class, 'show']);
+    Route::put('/details',     [UserProfileController::class, 'updateBasicInfo']);
+    Route::put('/password',    [UserProfileController::class, 'changePassword']);
     Route::put('/candidat',    [UserProfileController::class, 'updateCandidatProfile']);
     Route::put('/entreprise',  [UserProfileController::class, 'updateEntrepriseProfile']);
 });
 
-// ============================================================================
-// USERS / RÔLES (protégé) – Admin tooling
-// ============================================================================
+// ===================== USERS =====================
 Route::middleware('auth:sanctum')->prefix('users')->group(function () {
-    // AdminUserController
     Route::get('/',         [AdminUserController::class, 'index']);
     Route::post('/',        [AdminUserController::class, 'store']);
     Route::get('/{id}',     [AdminUserController::class, 'show'])->whereNumber('id');
     Route::put('/{id}',     [AdminUserController::class, 'update'])->whereNumber('id');
     Route::delete('/{id}',  [AdminUserController::class, 'destroy'])->whereNumber('id');
+    Route::put ('/{id}/status',        [AdminUserController::class, 'changeStatus'])->whereNumber('id');
+    Route::post('/{id}/reset-password',[AdminUserController::class, 'resetPassword'])->whereNumber('id');     // idem service front
 
-    // Outils
-    Route::post('/{id}/roles',    [AdminUserController::class, 'syncRoles'])->whereNumber('id');
     Route::post('/{id}/password', [AdminUserController::class, 'resetPassword'])->whereNumber('id');
     Route::patch('/{id}/toggle',  [AdminUserController::class, 'toggleActive'])->whereNumber('id');
 
-    // Gestion des rôles (RoleController "simple")
-    Route::post('/{userId}/roles/sync',   [RoleController::class, 'syncUserRoles'])->whereNumber('userId');
+    // Gestion des rôles utilisateur via RoleController
     Route::post('/{userId}/roles/attach', [RoleController::class, 'attachUserRoles'])->whereNumber('userId');
     Route::post('/{userId}/roles/detach', [RoleController::class, 'detachUserRoles'])->whereNumber('userId');
+    Route::post('/{userId}/roles/sync',   [RoleController::class, 'syncUserRoles'])->whereNumber('userId');
 });
 
-// Ressource rôles (admin étendu)
-Route::middleware('auth:sanctum')->group(function () {
-    Route::apiResource('/roles', AdminRoleController::class);
-    Route::post('/roles/assign',                 [AdminRoleController::class, 'assignRole']);
-    Route::post('/roles/remove',                 [AdminRoleController::class, 'removeRole']);
-    Route::put('/users/{userId}/role',           [AdminRoleController::class, 'changeUserRole'])->whereNumber('userId');
+// ===================== ROLES (CRUD) =====================
+Route::prefix('roles')->group(function () {
+    Route::get('/',        [RoleController::class, 'index']);
+    Route::post('/',       [RoleController::class, 'store']);
+    Route::get('/{id}',    [RoleController::class, 'show'])->whereNumber('id');
+    Route::put('/{id}',    [RoleController::class, 'update'])->whereNumber('id');
+    Route::delete('/{id}', [RoleController::class, 'destroy'])->whereNumber('id');
 });
 
 // ============================================================================
@@ -91,6 +88,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put ('/entreprises/{id}/validate',          [AdminDashboardController::class, 'validateEntrepriseByCompanyId'])->whereNumber('id');
     Route::put ('/entreprises/{id}/reject',            [AdminDashboardController::class, 'rejectEntrepriseByCompanyId'])->whereNumber('id');
     Route::put ('/entreprises/{id}/revalidate',        [AdminDashboardController::class, 'revalidateEntrepriseByCompanyId'])->whereNumber('id');
+});
+
+// routes/api.php
+Route::middleware('auth:sanctum')->group(function () {
+    Route::prefix('mon-entreprise')->group(function () {
+        Route::get('/', [MonEntrepriseController::class, 'show']);
+        Route::put('/', [MonEntrepriseController::class, 'update']);
+        Route::post('/logo', [MonEntrepriseController::class, 'uploadLogo']);
+        Route::get('/stats', [MonEntrepriseController::class, 'getStats']);
+    });
 });
 
 // ============================================================================
@@ -184,6 +191,7 @@ Route::prefix('publicites')->group(function () {
         ->whereIn('type', ['banniere','sidebar','footer']);
     Route::post('/{id}/vue',    [PubliciteController::class, 'incrementerVue'])->whereNumber('id');
     Route::post('/{id}/clic',   [PubliciteController::class, 'incrementerClic'])->whereNumber('id');
+    Route::get('/mes-publicites', [PubliciteController::class, 'getMesPublicites']);
 
     // Protégé
     Route::middleware('auth:sanctum')->group(function () {
@@ -221,7 +229,7 @@ Route::middleware('auth:sanctum')->prefix('notifications')->group(function () {
 // ============================================================================
 // CATÉGORIES & PAYS (protégé)
 // ============================================================================
-Route::middleware('auth:sanctum')->prefix('pays')->group(function () {
+Route::prefix('pays')->group(function () {
     Route::get   ('/',     [AdminPaysController::class, 'index']);
     Route::post  ('/',     [AdminPaysController::class, 'store']);
     Route::get   ('/{id}', [AdminPaysController::class, 'show'])->whereNumber('id');
