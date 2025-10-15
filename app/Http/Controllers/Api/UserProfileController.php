@@ -14,14 +14,18 @@ class UserProfileController extends Controller
     /**
      * Afficher le profil de l'utilisateur connecté
      */
-    public function show()
+    public function show(Request $request)
     {
-        $user = Auth::user()->load(['roles', 'candidat', 'entreprise']);
+        $user = $request->user();
+        $user->load(['candidat', 'entreprise', 'roles']);
         
         return response()->json([
             'success' => true,
             'data' => [
-                'user' => $user
+                'user' => $user,
+                'candidat' => $user->candidat,
+                'entreprise' => $user->entreprise,
+                'roles' => $user->roles
             ]
         ]);
     }

@@ -50,10 +50,7 @@ class User extends Authenticatable implements MustVerifyEmail
 
     public function roles(): BelongsToMany
     {
-        // ⚠️ Assure-toi que la table pivot s’appelle bien `role_user`
-        // et qu’elle a les colonnes `user_id` et `role_id`.
-        // Si ta table est différente (ex: roles_users), adapte les 2e/3e/4e paramètres :
-        // return $this->belongsToMany(Role::class, 'roles_users', 'user_id', 'role_id');
+        
         return $this->belongsToMany(Role::class, 'role_user', 'user_id', 'role_id');
     }
 
@@ -134,4 +131,5 @@ class User extends Authenticatable implements MustVerifyEmail
     {
         return $this->hasMany(Notification::class, 'auteur_id');
     }
+    
 }

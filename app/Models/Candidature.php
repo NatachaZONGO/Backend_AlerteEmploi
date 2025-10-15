@@ -3,7 +3,10 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Str;
+use App\Models\Offre;
+use App\Models\User;
 
 class Candidature extends Model
 {
@@ -28,7 +31,6 @@ class Candidature extends Model
     public static function generateUniqueCode(): string
     {
         do {
-            // Format: CAND-YEAR-XXXXXX (ex: CAND-2025-A1B2C3)
             $code = 'CAND-' . date('Y') . '-' . strtoupper(Str::random(6));
         } while (self::where('code', $code)->exists());
 
@@ -52,44 +54,49 @@ class Candidature extends Model
     /**
      * Relations
      */
-    public function offre()
+    public function offre(): BelongsTo
     {
         return $this->belongsTo(Offre::class);
     }
 
-    public function candidat()
+    /**
+     * ✅ CORRECTION : candidat_id pointe vers users.id
+     * Donc la relation doit être vers User, pas Candidat
+     */
+    public function candidat(): BelongsTo
     {
-        return $this->belongsTo(Candidat::class, 'candidat_id', 'id');
+        return $this->belongsTo(User::class, 'candidat_id', 'id');
     }
 
     /**
      * Accesseurs pour le frontend
+     * Maintenant candidat() retourne directement un User
      */
-    public function getFullNameAttribute()
+    public function getFullNameAttribute(): ?string
     {
-        $user = $this->candidat?->user;
+        $user = $this->candidat; // ✅ Directement un User
         if ($user) {
-            return trim($user->prenom . ' ' . $user->nom);
+            return trim(($user->prenom ?? '') . ' ' . ($user->nom ?? ''));
         }
         return null;
     }
 
-    public function getEmailAttribute()
+    public function getEmailAttribute(): ?string
     {
-        return $this->candidat?->user?->email;
+        return $this->candidat?->email; // ✅ Directement user->email
     }
 
-    public function getTelephoneAttribute()
+    public function getTelephoneAttribute(): ?string
     {
-        return $this->candidat?->user?->telephone;
+        return $this->candidat?->telephone; // ✅ Directement user->telephone
     }
 
-    public function getOffreTitreAttribute()
+    public function getOffreTitreAttribute(): ?string
     {
         return $this->offre?->titre;
     }
 
-    public function getMotivationTextAttribute()
+    public function getMotivationTextAttribute(): ?string
     {
         if (!empty($this->lettre_motivation) && !Str::startsWith($this->lettre_motivation, '[file]')) {
             return $this->lettre_motivation;
@@ -97,14 +104,13 @@ class Candidature extends Model
         return null;
     }
 
-    public function getCvDlAttribute()
+    public function getCvDlAttribute(): ?string
     {
         return $this->cv ? url("api/candidatures/{$this->id}/download/cv") : null;
     }
 
-    public function getLmDlAttribute()
+    public function getLmDlAttribute(): ?string
     {
-        // Vérifie s'il y a un fichier de lettre de motivation
         $hasFile = false;
         
         if (!empty($this->lettre_motivation_fichier)) {

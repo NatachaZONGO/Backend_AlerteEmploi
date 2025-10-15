@@ -4,6 +4,9 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
 use Carbon\Carbon;
 
 
@@ -49,10 +52,7 @@ class Offre extends Model
         return $this->belongsTo(Categorie::class);
     }
 
-    public function entreprise(): BelongsTo
-    {
-        return $this->belongsTo(Entreprise::class, 'recruteur_id', 'user_id');
-    }
+   
 
     public function validateur(): BelongsTo
     {
@@ -177,5 +177,14 @@ class Offre extends Model
         return $this->featured_until >= now();
     }
 
+    public function candidatures(): HasMany
+    {
+        return $this->hasMany(Candidature::class, 'offre_id');
+    }
     
+    
+    public function entreprise(): HasOne
+    {
+        return $this->hasOne(Entreprise::class, 'user_id', 'recruteur_id');
+    }
 }

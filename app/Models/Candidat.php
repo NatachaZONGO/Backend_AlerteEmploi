@@ -32,7 +32,7 @@ class Candidat extends Model
     // Relation vers les candidatures
     public function candidatures()
     {
-        return $this->hasMany(Candidature::class);
+        return $this->hasMany(Candidature::class, 'candidat_id');
     }
 
     // Relation vers la catégorie

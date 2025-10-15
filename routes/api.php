@@ -184,7 +184,7 @@ Route::prefix('candidatures')->group(function () {
 // ============================================================================
 // PUBLICITÉS (mixte public + protégé) – DÉDOUBLONNÉ
 // ============================================================================
-Route::prefix('publicites')->group(function () {
+Route::middleware('auth:sanctum')->prefix('publicites')->group(function () {
     // Public
     Route::get('/actives',      [PubliciteController::class, 'publiques']);
     Route::get('/type/{type}',  [PubliciteController::class, 'parType'])
@@ -248,4 +248,5 @@ Route::middleware('auth:sanctum')->prefix('categories')->group(function () {
 // ============================================================================
 // DASHBOARD GLOBALES (protégé)
 // ============================================================================
+
 Route::middleware('auth:sanctum')->get('/dashboard/stats', [\App\Http\Controllers\DashboardController::class, 'stats']);

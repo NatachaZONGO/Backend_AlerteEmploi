@@ -15,8 +15,10 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use App\Models\Notification;
+
 
 class CandidatureController extends Controller
 {
@@ -575,10 +577,85 @@ class CandidatureController extends Controller
         }
     }
 
-    public function index()
+    public function index(Request $request)
     {
-        $rows = Candidature::with(['candidat','candidat.user','offre'])->get();
-        return response()->json(['success'=>true,'data'=>$rows]);
+        try {
+            Log::info('=== index() - Toutes les candidatures (Admin) ===');
+            
+            $user = $request->user();
+            
+            // Vérifier que c'est un admin
+            if (!$user || ($user->role !== 'Administrateur' && $user->role !== 'admin')) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Accès réservé aux administrateurs'
+                ], 403);
+            }
+            
+            // Récupérer TOUTES les candidatures
+            // ✅ CORRECTION : charger 'candidat' (qui est un User), pas 'candidat.user'
+            $candidatures = Candidature::with([
+                'offre:id,titre,type_contrat,localisation',
+                'candidat:id,nom,prenom,email,telephone'  // ✅ Directement le User
+            ])
+            ->orderBy('created_at', 'desc')
+            ->get();
+            
+            Log::info("Candidatures trouvées: {$candidatures->count()}");
+            
+            // Formater les données
+            $formatted = $candidatures->map(function($candidature) {
+                return [
+                    'id' => $candidature->id,
+                    'code' => $candidature->code,
+                    'statut' => $candidature->statut,
+                    'created_at' => $candidature->created_at,
+                    
+                    // Infos de l'offre
+                    'offre_titre' => $candidature->offre?->titre ?? 'N/A',
+                    'offre_type_contrat' => $candidature->offre?->type_contrat ?? 'N/A',
+                    'offre_localisation' => $candidature->offre?->localisation ?? 'N/A',
+                    
+                    // ✅ Infos du candidat (directement depuis User)
+                    'candidat_nom' => $candidature->candidat ? 
+                        trim(($candidature->candidat->prenom ?? '') . ' ' . ($candidature->candidat->nom ?? '')) : 
+                        'N/A',
+                    'candidat_email' => $candidature->candidat?->email ?? 'N/A',
+                    'candidat_telephone' => $candidature->candidat?->telephone ?? 'N/A',
+                    
+                    // Fichiers
+                    'cv' => $candidature->cv,
+                    'lettre_motivation' => $candidature->lettre_motivation,
+                    'lettre_motivation_fichier' => $candidature->lettre_motivation_fichier,
+                    
+                    // URLs de téléchargement
+                    'cv_url' => $candidature->cv ? 
+                        url("api/candidatures/{$candidature->id}/download/cv") : null,
+                    'lm_url' => ($candidature->lettre_motivation_fichier || 
+                               (isset($candidature->lettre_motivation) && 
+                                \Str::startsWith($candidature->lettre_motivation, '[file]'))) ? 
+                        url("api/candidatures/{$candidature->id}/download/lm") : null,
+                ];
+            });
+            
+            return response()->json([
+                'success' => true,
+                'data' => $formatted
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('Erreur index():', [
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Erreur lors du chargement',
+                'error' => config('app.debug') ? $e->getMessage() : null
+            ], 500);
+        }
     }
 
     public function mesCandidatures(Request $request, $candidatParamId = null)
@@ -714,4 +791,101 @@ class CandidatureController extends Controller
 
         return Storage::disk('public')->download($path, basename($path));
     }
+
+     public function candidaturesRecues(Request $request)
+        {
+            try {
+                \Log::info('=== DEBUT candidaturesRecues ===');
+                
+                $user = $request->user();
+                
+                if (!$user) {
+                    return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+                }
+                
+                if ($user->role !== 'Recruteur') {
+                    return response()->json(['success' => false, 'message' => 'Accès réservé aux recruteurs'], 403);
+                }
+                
+                \Log::info('Récupération des candidatures avec relations...');
+                
+                // Récupérer avec les relations
+                $candidatures = Candidature::whereHas('offre', function($query) use ($user) {
+                    $query->where('recruteur_id', $user->id);
+                })
+                ->with(['offre:id,titre,type_contrat,localisation']) // ✅ Charger offre
+                ->orderBy('created_at', 'desc')
+                ->limit(10)
+                ->get();
+                
+                \Log::info('Candidatures avec offre chargées: ' . $candidatures->count());
+                
+                // Formater les données
+                $formatted = $candidatures->map(function($candidature) {
+                    \Log::info("Traitement candidature ID: {$candidature->id}");
+                    
+                    // Récupérer le candidat (User)
+                    $candidatUser = null;
+                    try {
+                        $candidatUser = \App\Models\User::find($candidature->candidat_id);
+                        \Log::info("Candidat trouvé: " . ($candidatUser ? $candidatUser->email : 'NULL'));
+                    } catch (\Exception $e) {
+                        \Log::error("Erreur chargement candidat: " . $e->getMessage());
+                    }
+                    
+                    return [
+                        'id' => $candidature->id,
+                        'code' => $candidature->code,
+                        'statut' => $candidature->statut,
+                        'created_at' => $candidature->created_at,
+                        
+                        // Infos de l'offre
+                        'offre_titre' => $candidature->offre?->titre ?? 'N/A',
+                        'offre_type_contrat' => $candidature->offre?->type_contrat ?? 'N/A',
+                        'offre_localisation' => $candidature->offre?->localisation ?? 'N/A',
+                        
+                        // Infos du candidat (User)
+                        'candidat_nom' => $candidatUser ? 
+                            trim(($candidatUser->prenom ?? '') . ' ' . ($candidatUser->nom ?? '')) : 
+                            'N/A',
+                        'candidat_email' => $candidatUser?->email ?? 'N/A',
+                        'candidat_telephone' => $candidatUser?->telephone ?? 'N/A',
+                        
+                        // Fichiers
+                        'cv' => $candidature->cv,
+                        'lettre_motivation' => $candidature->lettre_motivation,
+                        'lettre_motivation_fichier' => $candidature->lettre_motivation_fichier,
+                        
+                        // URLs de téléchargement
+                        'cv_url' => $candidature->cv ? 
+                            url("api/candidatures/{$candidature->id}/download/cv") : null,
+                        'lm_url' => ($candidature->lettre_motivation_fichier || 
+                                (isset($candidature->lettre_motivation) && 
+                                    \Str::startsWith($candidature->lettre_motivation, '[file]'))) ? 
+                            url("api/candidatures/{$candidature->id}/download/lm") : null,
+                    ];
+                });
+                
+                \Log::info('=== FIN candidaturesRecues SUCCESS ===');
+                
+                return response()->json([
+                    'success' => true,
+                    'data' => $formatted
+                ]);
+                
+            } catch (\Exception $e) {
+                \Log::error('=== ERREUR candidaturesRecues ===');
+                \Log::error('Message: ' . $e->getMessage());
+                \Log::error('File: ' . $e->getFile());
+                \Log::error('Line: ' . $e->getLine());
+                
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Erreur lors du chargement',
+                    'error' => config('app.debug') ? $e->getMessage() : null
+                ], 500);
+            }
+        }
+
+    
 }
