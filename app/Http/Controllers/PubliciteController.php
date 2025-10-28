@@ -1,5 +1,4 @@
 <?php
-
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
@@ -15,6 +14,9 @@ class PubliciteController extends Controller
 {
     /* ======================= Helpers ======================= */
 
+    /**
+     * ✅ Helper pour résoudre l'entreprise_id (compatible avec l'ancien système)
+     */
     private function resolveEntrepriseId(Request $request): ?int
     {
         if ($request->filled('entreprise_id')) return (int)$request->integer('entreprise_id');
@@ -22,10 +24,6 @@ class PubliciteController extends Controller
 
         $userId = $request->integer('entreprise_user_id') ?: $request->integer('user_id');
         if ($userId) return Entreprise::where('user_id', $userId)->value('id');
-
-        // Si tu veux, on peut fallback sur l’utilisateur connecté (quand tu remettras l’auth)
-        // $authEntreprise = Entreprise::where('user_id', auth()->id())->value('id');
-        // if ($authEntreprise) return $authEntreprise;
 
         return null;
     }
@@ -37,11 +35,31 @@ class PubliciteController extends Controller
 
     /* ======================= CRUD ======================= */
 
-    // GET /publicites?statut=&type=&q=&per_page=
+    /**
+     * ✅ GET /publicites (Admin voit tout, Recruteur/CM voient leurs entreprises)
+     */
     public function index(Request $request)
     {
+        $user = Auth::user();
         $q = Publicite::with(['entreprise','validateur']);
 
+        // ✅ Si Recruteur ou CM : filtrer par entreprises gérables
+        if ($user && ($user->hasRole('recruteur') || $user->hasRole('community_manager'))) {
+            $entreprises = $user->getManageableEntreprises();
+            $entrepriseIds = $entreprises->pluck('id');
+            
+            if ($entrepriseIds->isNotEmpty()) {
+                $q->whereIn('entreprise_id', $entrepriseIds);
+            } else {
+                // Aucune entreprise gérable : retourner vide
+                return response()->json([
+                    'success' => true,
+                    'data' => ['data' => [], 'total' => 0]
+                ]);
+            }
+        }
+
+        // Filtres
         if ($request->filled('statut')) $q->where('statut', $request->query('statut'));
         if ($request->filled('type'))   $q->where('type',   $request->query('type'));
         if ($search = $request->query('q')) {
@@ -61,9 +79,25 @@ class PubliciteController extends Controller
         ]);
     }
 
-   // POST /publicites
+    /**
+     * ✅ POST /publicites (Recruteur ET Community Manager)
+     */
     public function store(Request $request)
     {
+        $user = Auth::user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Vérifier que c'est un recruteur OU community manager
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Seuls les recruteurs et community managers peuvent créer des publicités'
+            ], 403);
+        }
+        
         $base = $request->validate([
             'titre'         => 'required|string|max:255',
             'description'   => 'nullable|string|max:10000',
@@ -80,11 +114,31 @@ class PubliciteController extends Controller
         ]);
 
         $entrepriseId = $this->resolveEntrepriseId($request);
+        
+        // ✅ Si pas d'entreprise spécifiée, prendre la première gérable
         if (!$entrepriseId) {
-            return response()->json(['success'=>false,'message'=>"Entreprise non valide"], 422);
+            $entreprises = $user->getManageableEntreprises();
+            $entreprise = $entreprises->first();
+            
+            if (!$entreprise) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aucune entreprise disponible pour créer des publicités'
+                ], 422);
+            }
+            
+            $entrepriseId = $entreprise->id;
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise
+        if (!$user->canManageEntreprise($entrepriseId)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
         }
 
-        // ⚠️ TOUJOURS initialiser
+        // Initialiser
         $image = null;
         $video = null;
 
@@ -93,7 +147,6 @@ class PubliciteController extends Controller
             $request->validate(['image' => 'image|mimes:jpg,jpeg,png,webp,gif|max:5120']);
             $image = $request->file('image')->store('publicites/images','public');
         } elseif ($request->filled('image')) {
-            // image passée en URL/chemin (string)
             $request->validate(['image' => 'string|max:1000']);
             $image = $request->input('image');
         }
@@ -130,7 +183,6 @@ class PubliciteController extends Controller
                 $dualUnlockedAt = now();
                 $mediaEffective = 'both';
             } else {
-                // si un seul média fourni au départ
                 $mediaEffective = $image ? 'image' : 'video';
             }
         }
@@ -158,7 +210,6 @@ class PubliciteController extends Controller
         return response()->json(['success'=>true,'message'=>'Publicité créée','data'=>$pub], 201);
     }
 
-
     // GET /publicites/{id}
     public function show($id)
     {
@@ -166,10 +217,25 @@ class PubliciteController extends Controller
         return response()->json(['success'=>true,'data'=>$pub]);
     }
 
-    // PUT /publicites/{id}
+    /**
+     * ✅ PUT /publicites/{id}
+     */
     public function update(Request $request, $id)
     {
+        $user = Auth::user();
         $pub = Publicite::findOrFail($id);
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise de la publicité
+        if (!$user->canManageEntreprise($pub->entreprise_id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'êtes pas autorisé à modifier cette publicité'
+            ], 403);
+        }
 
         // Autoriser modification en: brouillon, en_attente, active (mais champs restreints si active)
         $modifiable = ['brouillon','en_attente','active'];
@@ -182,7 +248,6 @@ class PubliciteController extends Controller
                               'entreprise_id','entreprise_pk','entreprise_user_id','user_id','statut'];
 
         if ($pub->statut === 'active') {
-            // ne garder que les champs “safe”
             $request->replace($request->only($mutableAlways));
         }
 
@@ -252,11 +317,20 @@ class PubliciteController extends Controller
             $data['date_fin']   = $calc['date_fin'];
         }
 
-        // Changement d’entreprise si pas active
+        // Changement d'entreprise si pas active
         if ($pub->statut !== 'active' &&
             ($request->filled('entreprise_id') || $request->filled('entreprise_pk') || $request->filled('entreprise_user_id') || $request->filled('user_id'))) {
             $newEntrepriseId = $this->resolveEntrepriseId($request);
             if (!$newEntrepriseId) return response()->json(['success'=>false,'message'=>"Entreprise cible invalide"],422);
+            
+            // ✅ Vérifier les droits sur la nouvelle entreprise
+            if (!$user->canManageEntreprise($newEntrepriseId)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Vous n\'avez pas accès à l\'entreprise cible'
+                ], 403);
+            }
+            
             $data['entreprise_id'] = $newEntrepriseId;
         }
 
@@ -293,13 +367,35 @@ class PubliciteController extends Controller
         return response()->json(['success'=>true,'message'=>'Publicité mise à jour','data'=>$pub->fresh()]);
     }
 
-    // DELETE /publicites/{id}
+    /**
+     * ✅ DELETE /publicites/{id}
+     */
     public function destroy($id)
     {
+        $user = Auth::user();
         $pub = Publicite::findOrFail($id);
-        if ($pub->image && !preg_match('#^https?://#i',$pub->image)) Storage::disk('public')->delete($pub->image);
-        if ($pub->video && !preg_match('#^https?://#i',$pub->video)) Storage::disk('public')->delete($pub->video);
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise de la publicité
+        if (!$user->canManageEntreprise($pub->entreprise_id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'êtes pas autorisé à supprimer cette publicité'
+            ], 403);
+        }
+        
+        if ($pub->image && !preg_match('#^https?://#i',$pub->image)) {
+            Storage::disk('public')->delete($pub->image);
+        }
+        if ($pub->video && !preg_match('#^https?://#i',$pub->video)) {
+            Storage::disk('public')->delete($pub->video);
+        }
+        
         $pub->delete();
+        
         return response()->json(['success'=>true,'message'=>'Publicité supprimée']);
     }
 
@@ -345,12 +441,103 @@ class PubliciteController extends Controller
         return response()->json(['success'=>true,'message'=>'Publicité désactivée']);
     }
 
+    /**
+     * ✅ Soumettre une publicité pour validation
+     */
     public function soumettre($id)
     {
+        $user = Auth::user();
         $pub = Publicite::findOrFail($id);
-        if ($pub->statut !== 'brouillon') return response()->json(['success'=>false,'message'=>'Cette publicité ne peut pas être soumise'],422);
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise de la publicité
+        if (!$user->canManageEntreprise($pub->entreprise_id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'êtes pas autorisé à soumettre cette publicité'
+            ], 403);
+        }
+        
+        if ($pub->statut !== 'brouillon') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cette publicité ne peut pas être soumise'
+            ], 422);
+        }
+        
         $pub->update(['statut'=>'en_attente']);
+        
         return response()->json(['success'=>true,'message'=>'Publicité soumise']);
+    }
+
+    /**
+     * ✅ Activer une publicité
+     */
+    public function activer(Request $request, $id)
+    {
+        $user = Auth::user();
+        $pub = Publicite::findOrFail($id);
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise de la publicité
+        if (!$user->canManageEntreprise($pub->entreprise_id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'êtes pas autorisé à activer cette publicité'
+            ], 403);
+        }
+
+        // On n'active que depuis brouillon/en_attente
+        if (!in_array($pub->statut, ['brouillon', 'en_attente'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cette publicité ne peut pas être activée depuis son statut actuel.'
+            ], 422);
+        }
+
+        // On exige la durée, la date de début et la preuve de paiement "paid"
+        $data = $request->validate([
+            'duree'          => 'required|in:3,7,14,30,60,90',
+            'date_debut'     => 'required|date|after_or_equal:today',
+            'payment_status' => 'required|in:paid',
+        ]);
+
+        // Calcul fin/prix
+        $calc = Publicite::calculerPrixEtDateFin($data['duree'], $data['date_debut']);
+
+        // Validation business: dates
+        $start = \Carbon\Carbon::parse($data['date_debut']);
+        $end   = \Carbon\Carbon::parse($calc['date_fin']);
+        if (now()->gt($end)) {
+            return response()->json([
+                'success' => false,
+                'message' => "La période d'activation est déjà échue."
+            ], 422);
+        }
+
+        // Mise à jour finale
+        $pub->update([
+            'duree'           => $data['duree'],
+            'date_debut'      => $data['date_debut'],
+            'date_fin'        => $calc['date_fin'],
+            'prix'            => $calc['prix'],
+            'payment_status'  => 'paid',
+            'statut'          => 'active',
+            'validee_par'     => Auth::id(),
+            'date_validation' => now(),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Publicité activée',
+            'data'    => $pub->fresh(['entreprise','validateur']),
+        ]);
     }
 
     /* ======================= Lecture publique & stats ======================= */
@@ -372,19 +559,148 @@ class PubliciteController extends Controller
         return response()->json(['success'=>true,'data'=>$rows]);
     }
 
-    public function statistiques()
+    /**
+     * ✅ Statistiques des publicités (Global pour Admin, Personnelles pour Recruteur/CM)
+     */
+    public function statistiques(Request $request)
     {
-        $stats = [
-            'total'         => Publicite::count(),
-            'brouillon'     => Publicite::where('statut','brouillon')->count(),
-            'en_attente'    => Publicite::where('statut','en_attente')->count(),
-            'active'        => Publicite::where('statut','active')->count(),
-            'expiree'       => Publicite::where('statut','expiree')->count(),
-            'rejetee'       => Publicite::where('statut','rejetee')->count(),
-            'revenus_total' => Publicite::whereIn('statut',['active','expiree'])->sum('prix'),
-            'revenus_mois'  => Publicite::whereIn('statut',['active','expiree'])->whereMonth('created_at', now()->month)->sum('prix'),
-        ];
-        return response()->json(['success'=>true,'data'=>$stats]);
+        $user = Auth::user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Si admin : statistiques globales
+        if ($user->hasRole('administrateur')) {
+            $stats = [
+                'total'         => Publicite::count(),
+                'brouillon'     => Publicite::where('statut','brouillon')->count(),
+                'en_attente'    => Publicite::where('statut','en_attente')->count(),
+                'active'        => Publicite::where('statut','active')->count(),
+                'expiree'       => Publicite::where('statut','expiree')->count(),
+                'rejetee'       => Publicite::where('statut','rejetee')->count(),
+                'revenus_total' => Publicite::whereIn('statut',['active','expiree'])->sum('prix'),
+                'revenus_mois'  => Publicite::whereIn('statut',['active','expiree'])
+                    ->whereMonth('created_at', now()->month)
+                    ->sum('prix'),
+            ];
+            
+            return response()->json(['success'=>true,'data'=>$stats]);
+        }
+        
+        // ✅ Si recruteur ou CM : statistiques personnelles
+        if ($user->hasRole('recruteur') || $user->hasRole('community_manager')) {
+            $entreprises = $user->getManageableEntreprises();
+            $entrepriseIds = $entreprises->pluck('id');
+            
+            if ($entrepriseIds->isEmpty()) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'total' => 0,
+                        'brouillon' => 0,
+                        'en_attente' => 0,
+                        'active' => 0,
+                        'expiree' => 0,
+                        'rejetee' => 0,
+                        'cout_total' => 0,
+                        'cout_mois' => 0,
+                    ]
+                ]);
+            }
+            
+            $query = Publicite::whereIn('entreprise_id', $entrepriseIds);
+            
+            $stats = [
+                'total'       => (clone $query)->count(),
+                'brouillon'   => (clone $query)->where('statut','brouillon')->count(),
+                'en_attente'  => (clone $query)->where('statut','en_attente')->count(),
+                'active'      => (clone $query)->where('statut','active')->count(),
+                'expiree'     => (clone $query)->where('statut','expiree')->count(),
+                'rejetee'     => (clone $query)->where('statut','rejetee')->count(),
+                'cout_total'  => (clone $query)->whereIn('statut',['active','expiree'])->sum('prix'),
+                'cout_mois'   => (clone $query)->whereIn('statut',['active','expiree'])
+                    ->whereMonth('created_at', now()->month)
+                    ->sum('prix'),
+            ];
+            
+            return response()->json(['success'=>true,'data'=>$stats]);
+        }
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Accès non autorisé'
+        ], 403);
+    }
+
+    /**
+     * ✅ Mes publicités (Recruteur ET Community Manager)
+     */
+    public function getMesPublicites(Request $request)
+    {
+        $user = $request->user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        // ✅ Vérifier que c'est un recruteur OU community manager
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Accès réservé aux recruteurs et community managers'
+            ], 403);
+        }
+        
+        // ✅ Récupérer toutes les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+        $entrepriseIds = $entreprises->pluck('id');
+        
+        if ($entrepriseIds->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'data' => [],
+                    'total' => 0
+                ],
+                'message' => 'Aucune entreprise à gérer'
+            ]);
+        }
+        
+        // ✅ Filtrer par entreprise si spécifié (utile pour CM avec plusieurs entreprises)
+        $query = Publicite::with(['entreprise', 'validateur'])
+            ->whereIn('entreprise_id', $entrepriseIds);
+        
+        if ($request->filled('entreprise_id')) {
+            $entrepriseId = $request->integer('entreprise_id');
+            
+            // Vérifier que l'utilisateur peut gérer cette entreprise
+            if (!$user->canManageEntreprise($entrepriseId)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Vous n\'avez pas accès à cette entreprise'
+                ], 403);
+            }
+            
+            $query->where('entreprise_id', $entrepriseId);
+        }
+        
+        // Filtrer par statut si spécifié
+        if ($request->filled('statut')) {
+            $query->where('statut', $request->query('statut'));
+        }
+        
+        $publicites = $query->orderBy('created_at', 'desc')
+            ->paginate(15);
+        
+        return response()->json([
+            'success' => true,
+            'data' => $publicites,
+            'meta' => [
+                // ✅ Liste des entreprises pour le filtre frontend
+                'entreprises' => $entreprises
+            ]
+        ]);
     }
 
     /* ======================= Compteurs & dual ======================= */
@@ -425,83 +741,4 @@ class PubliciteController extends Controller
 
         return response()->json(['success'=>true,'message'=>'Double média activé','data'=>$pub->fresh()]);
     }
-
-    public function activer(Request $request, $id)
-{
-    $pub = Publicite::findOrFail($id);
-
-    // On n’active que depuis brouillon/en_attente
-    if (!in_array($pub->statut, ['brouillon', 'en_attente'])) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Cette publicité ne peut pas être activée depuis son statut actuel.'
-        ], 422);
-    }
-
-    // On exige la durée, la date de début et la preuve de paiement "paid"
-    $data = $request->validate([
-        'duree'          => 'required|in:3,7,14,30,60,90',
-        'date_debut'     => 'required|date|after_or_equal:today',
-        'payment_status' => 'required|in:paid',
-    ]);
-
-    // Calcul fin/prix
-    $calc = Publicite::calculerPrixEtDateFin($data['duree'], $data['date_debut']);
-
-    // Validation business: dates
-    $start = \Carbon\Carbon::parse($data['date_debut']);
-    $end   = \Carbon\Carbon::parse($calc['date_fin']);
-    if (now()->gt($end)) {
-        return response()->json([
-            'success' => false,
-            'message' => "La période d'activation est déjà échue."
-        ], 422);
-    }
-
-    // Mise à jour finale
-    $pub->update([
-        'duree'           => $data['duree'],
-        'date_debut'      => $data['date_debut'],
-        'date_fin'        => $calc['date_fin'],
-        'prix'            => $calc['prix'],
-        'payment_status'  => 'paid',
-        'statut'          => 'active',
-        'validee_par'     => \Auth::id(),   // optionnel si pas d’auth pour l’instant
-        'date_validation' => now(),
-    ]);
-
-    return response()->json([
-        'success' => true,
-        'message' => 'Publicité activée',
-        'data'    => $pub->fresh(['entreprise','validateur']),
-    ]);
-}
-
-public function getMesPublicites(Request $request)
-{
-    $user = $request->user();
-    
-    // Log pour déboguer
-    \Log::info('getMesPublicites appelé par user:', [
-        'user_id' => $user->id,
-        'user_role' => $user->roles->pluck('nom')
-    ]);
-    
-    // Filtrer les publicités par entreprise du recruteur
-    // Vous devez adapter selon votre structure de données
-    $publicites = Publicite::with(['entreprise'])
-        ->whereHas('entreprise', function($query) use ($user) {
-            $query->where('user_id', $user->id);
-        })
-        ->orderBy('created_at', 'desc')
-        ->paginate(15);
-    
-    \Log::info('Nombre de publicités trouvées:', ['count' => $publicites->total()]);
-    
-    return response()->json([
-        'success' => true,
-        'data' => $publicites
-    ]);
-}
-
 }

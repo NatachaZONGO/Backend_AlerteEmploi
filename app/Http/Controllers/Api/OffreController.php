@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Http\Controllers\Api;
+namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Offre;
@@ -18,7 +18,7 @@ class OffreController extends Controller
      */
     public function index(Request $request)
     {
-        $query = Offre::with(['entreprise', 'categorie']) // Recruteur n'est pas nécessaire
+        $query = Offre::with(['entreprise', 'categorie'])
             ->active(); // Seulement les offres actives
 
         // Filtres optionnels
@@ -49,25 +49,52 @@ class OffreController extends Controller
     }
 
     /**
-     * Créer une nouvelle offre (recruteurs seulement)
+     * ✅ Créer une nouvelle offre (Recruteurs ET Community Managers)
      */
     public function store(Request $request)
     {
         $user = Auth::user();
 
-        // Vérifier que l'utilisateur est un recruteur
-        if (!$user->hasRole('recruteur')) {
+        // ✅ Vérifier que l'utilisateur est recruteur OU community manager
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
             return response()->json([
                 'success' => false,
-                'message' => 'Seuls les recruteurs peuvent créer des offres'
+                'message' => 'Seuls les recruteurs et community managers peuvent créer des offres'
             ], 403);
         }
 
-        // Vérifier que l'entreprise est validée
-        if ($user->entreprise->statut !== 'valide') {
+        // ✅ Récupérer l'entreprise
+        $entrepriseId = $request->input('entreprise_id');
+
+        // Si pas spécifiée, prendre la première gérable
+        if (!$entrepriseId) {
+            $entreprises = $user->getManageableEntreprises();
+            $entreprise = $entreprises->first();
+            
+            if (!$entreprise) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aucune entreprise disponible pour publier des offres'
+                ], 403);
+            }
+            
+            $entrepriseId = $entreprise->id;
+        }
+
+        // ✅ Vérifier les droits sur l'entreprise
+        if (!$user->canManageEntreprise($entrepriseId)) {
             return response()->json([
                 'success' => false,
-                'message' => 'Votre entreprise doit être validée pour publier des offres'
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
+        }
+
+        // ✅ Vérifier que l'entreprise est validée
+        $entreprise = \App\Models\Entreprise::find($entrepriseId);
+        if (!$entreprise || $entreprise->statut !== 'valide') {
+            return response()->json([
+                'success' => false,
+                'message' => 'L\'entreprise doit être validée pour publier des offres'
             ], 403);
         }
 
@@ -101,8 +128,9 @@ class OffreController extends Controller
             'date_expiration' => $request->date_expiration,
             'salaire' => $request->salaire,
             'categorie_id' => $request->categorie_id,
-            'recruteur_id' => $user->id,
-            'statut' => 'brouillon', // Par défaut en brouillon
+            'entreprise_id' => $entrepriseId, // ✅ IMPORTANT
+            'recruteur_id' => $user->id, // L'utilisateur qui a créé (peut être CM)
+            'statut' => 'brouillon',
         ]);
 
         return response()->json([
@@ -128,7 +156,11 @@ class OffreController extends Controller
 
         // Vérifier si l'offre est accessible
         $user = Auth::user();
-        if ($offre->statut !== 'publiee' && (!$user || $offre->recruteur_id !== $user->id)) {
+        
+        // ✅ Vérifier si l'utilisateur peut gérer cette offre
+        $canManage = $user && $user->canManageEntreprise($offre->entreprise_id);
+        
+        if ($offre->statut !== 'publiee' && !$canManage) {
             return response()->json([
                 'success' => false,
                 'message' => 'Offre non accessible'
@@ -142,7 +174,7 @@ class OffreController extends Controller
     }
 
     /**
-     * Mettre à jour une offre (propriétaire seulement)
+     * ✅ Mettre à jour une offre (Recruteur propriétaire OU CM assigné)
      */
     public function update(Request $request, $id)
     {
@@ -156,8 +188,8 @@ class OffreController extends Controller
             ], 404);
         }
 
-        // Vérifier que l'utilisateur est le propriétaire de l'offre
-        if ($offre->recruteur_id !== $user->id) {
+        // ✅ Vérifier les droits sur l'entreprise de l'offre
+        if (!$user->canManageEntreprise($offre->entreprise_id)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Vous n\'êtes pas autorisé à modifier cette offre'
@@ -197,7 +229,7 @@ class OffreController extends Controller
     }
 
     /**
-     * Supprimer une offre (propriétaire seulement)
+     * ✅ Supprimer une offre (Recruteur propriétaire OU CM assigné)
      */
     public function destroy($id)
     {
@@ -211,8 +243,8 @@ class OffreController extends Controller
             ], 404);
         }
 
-        // Vérifier que l'utilisateur est le propriétaire de l'offre
-        if ($offre->recruteur_id !== $user->id) {
+        // ✅ Vérifier les droits sur l'entreprise de l'offre
+        if (!$user->canManageEntreprise($offre->entreprise_id)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Vous n\'êtes pas autorisé à supprimer cette offre'
@@ -228,7 +260,7 @@ class OffreController extends Controller
     }
 
     /**
-     * Soumettre une offre pour validation (recruteurs)
+     * ✅ Soumettre une offre pour validation (Recruteur OU CM)
      */
     public function soumettreValidation($id)
     {
@@ -242,8 +274,8 @@ class OffreController extends Controller
             ], 404);
         }
 
-        // Vérifier que l'utilisateur est le propriétaire de l'offre
-        if ($offre->recruteur_id !== $user->id) {
+        // ✅ Vérifier les droits sur l'entreprise de l'offre
+        if (!$user->canManageEntreprise($offre->entreprise_id)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Vous n\'êtes pas autorisé à soumettre cette offre'
@@ -260,7 +292,10 @@ class OffreController extends Controller
         $offre->soumettreValidation();
 
         // Notifier tous les admins
-        $admins = User::role('admin')->get();
+        $admins = User::whereHas('roles', function($query) {
+            $query->where('nom', 'administrateur');
+        })->get();
+        
         foreach ($admins as $admin) {
             $admin->notify(new NouvelleOffreEnAttenteNotification($offre));
         }
@@ -280,7 +315,7 @@ class OffreController extends Controller
         $user = Auth::user();
 
         // Seuls les admins peuvent publier
-        if (!$user->hasRole('admin')) {
+        if (!$user->hasRole('administrateur')) {
             return response()->json([
                 'success' => false,
                 'message' => 'Seuls les administrateurs peuvent publier des offres'
@@ -313,7 +348,7 @@ class OffreController extends Controller
     }
 
     /**
-     * Fermer une offre
+     * ✅ Fermer une offre (Recruteur OU CM)
      */
     public function fermer($id)
     {
@@ -327,8 +362,8 @@ class OffreController extends Controller
             ], 404);
         }
 
-        // Vérifier que l'utilisateur est le propriétaire de l'offre
-        if ($offre->recruteur_id !== $user->id) {
+        // ✅ Vérifier les droits sur l'entreprise de l'offre
+        if (!$user->canManageEntreprise($offre->entreprise_id)) {
             return response()->json([
                 'success' => false,
                 'message' => 'Vous n\'êtes pas autorisé à fermer cette offre'
@@ -345,25 +380,46 @@ class OffreController extends Controller
     }
 
     /**
-     * Lister les offres du recruteur connecté
+     * ✅ Lister les offres des entreprises gérables (Recruteur OU CM)
      */
     public function mesOffres(Request $request)
     {
         $user = Auth::user();
 
-        if (!$user->hasRole('recruteur')) {
+        // ✅ Vérifier que l'utilisateur est recruteur OU community manager
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
             return response()->json([
                 'success' => false,
-                'message' => 'Seuls les recruteurs peuvent accéder à cette fonctionnalité'
+                'message' => 'Seuls les recruteurs et community managers peuvent accéder à cette fonctionnalité'
             ], 403);
         }
 
+        // ✅ Récupérer toutes les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+        $entrepriseIds = $entreprises->pluck('id');
+
+        // ✅ Requête pour les offres de toutes les entreprises gérables
         $query = Offre::with(['entreprise', 'categorie'])
-            ->where('recruteur_id', $user->id);
+            ->whereIn('entreprise_id', $entrepriseIds);
 
         // Filtrer par statut si spécifié
         if ($request->has('statut')) {
             $query->where('statut', $request->statut);
+        }
+
+        // Filtrer par entreprise spécifique (utile pour le CM qui gère plusieurs entreprises)
+        if ($request->has('entreprise_id')) {
+            $entrepriseId = $request->input('entreprise_id');
+            
+            // Vérifier que l'utilisateur peut gérer cette entreprise
+            if (!$user->canManageEntreprise($entrepriseId)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Vous n\'avez pas accès à cette entreprise'
+                ], 403);
+            }
+            
+            $query->where('entreprise_id', $entrepriseId);
         }
 
         $offres = $query->orderBy('created_at', 'desc')
@@ -371,8 +427,122 @@ class OffreController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $offres
+            'data' => $offres,
+            // ✅ Ajouter la liste des entreprises pour le filtre frontend
+            'meta' => [
+                'entreprises' => $entreprises
+            ]
+        ]);
+    }
+
+    /**
+     * ✅ NOUVEAU : Dashboard des offres (statistiques)
+     */
+    public function dashboard(Request $request)
+    {
+        $user = Auth::user();
+
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Accès non autorisé'
+            ], 403);
+        }
+
+        // Récupérer les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+        $entrepriseIds = $entreprises->pluck('id');
+
+        // Statistiques
+        $stats = [
+            'total' => Offre::whereIn('entreprise_id', $entrepriseIds)->count(),
+            'brouillon' => Offre::whereIn('entreprise_id', $entrepriseIds)->where('statut', 'brouillon')->count(),
+            'en_attente' => Offre::whereIn('entreprise_id', $entrepriseIds)->where('statut', 'en_attente')->count(),
+            'validee' => Offre::whereIn('entreprise_id', $entrepriseIds)->where('statut', 'validee')->count(),
+            'publiee' => Offre::whereIn('entreprise_id', $entrepriseIds)->where('statut', 'publiee')->count(),
+            'fermee' => Offre::whereIn('entreprise_id', $entrepriseIds)->where('statut', 'fermee')->count(),
+        ];
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'stats' => $stats,
+                'entreprises' => $entreprises
+            ]
+        ]);
+    }
+
+    /**
+     * Valider une offre (Admin seulement)
+     */
+    public function valider($id)
+    {
+        $user = Auth::user();
+
+        if (!$user->hasRole('administrateur')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Seuls les administrateurs peuvent valider des offres'
+            ], 403);
+        }
+
+        $offre = Offre::find($id);
+
+        if (!$offre) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Offre non trouvée'
+            ], 404);
+        }
+
+        if ($offre->statut !== 'en_attente') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Seules les offres en attente peuvent être validées'
+            ], 400);
+        }
+
+        $offre->update(['statut' => 'validee']);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Offre validée avec succès',
+            'data' => $offre->load(['recruteur', 'entreprise', 'categorie'])
+        ]);
+    }
+
+    /**
+     * Rejeter une offre (Admin seulement)
+     */
+    public function rejeter(Request $request, $id)
+    {
+        $user = Auth::user();
+
+        if (!$user->hasRole('administrateur')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Seuls les administrateurs peuvent rejeter des offres'
+            ], 403);
+        }
+
+        $offre = Offre::find($id);
+
+        if (!$offre) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Offre non trouvée'
+            ], 404);
+        }
+
+        $offre->update([
+            'statut' => 'rejetee',
+            'raison_rejet' => $request->input('raison_rejet')
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Offre rejetée avec succès',
+            'data' => $offre->load(['recruteur', 'entreprise', 'categorie'])
         ]);
     }
 }
-

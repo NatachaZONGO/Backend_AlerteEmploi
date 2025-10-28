@@ -127,3 +127,8 @@ return [
     ],
 
 ];
+   $app->withMiddleware(function (Middleware $middleware) use ($app) {
+    $middleware->alias([
+        'entreprise.access' => \App\Http\Middleware\CheckEntrepriseAccess::class,
+    ]);
+});

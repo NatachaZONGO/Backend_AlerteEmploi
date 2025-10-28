@@ -187,4 +187,33 @@ class UserProfileController extends Controller
             ]
         ]);
     }
+
+    public function uploadPhoto(Request $request)
+{
+    $request->validate([
+        'photo' => 'required|image|mimes:jpeg,png,jpg,gif|max:5120', // 5MB
+    ]);
+
+    $user = auth()->user();
+    
+    // Supprimer l'ancienne photo si elle existe
+    if ($user->photo && Storage::exists('public/' . $user->photo)) {
+        Storage::delete('public/' . $user->photo);
+    }
+    
+    // Stocker la nouvelle photo
+    $path = $request->file('photo')->store('photos/users', 'public');
+    
+    // Mettre à jour l'utilisateur
+    $user->update(['photo' => $path]);
+    
+    return response()->json([
+        'success' => true,
+        'message' => 'Photo mise à jour avec succès',
+        'data' => [
+            'photo' => $path,
+            'photo_url' => asset('storage/' . $path)
+        ]
+    ]);
+}
 }

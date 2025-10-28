@@ -1,5 +1,4 @@
 <?php
-
 namespace App\Http\Controllers;
 
 use App\Models\Candidature;
@@ -25,28 +24,38 @@ class CandidatureController extends Controller
     /**
      * Envoie l'email de confirmation avec le code de suivi
      */
+    private function getEntrepriseIdFromOffre(Offre $offre): ?int
+    {
+        // Récupérer le recruteur de l'offre
+        $recruteur = User::find($offre->recruteur_id);
+        
+        if (!$recruteur) {
+            return null;
+        }
+        
+        // Récupérer l'entreprise du recruteur
+        $entreprise = $recruteur->entreprise()->first();
+        
+        return $entreprise ? $entreprise->id : null;
+    }
     private function sendConfirmationEmail($candidature, $email)
     {
         try {
-            // Charge les relations nécessaires
-            $candidature->load(['offre', 'candidat.user']);
+            $candidature->load(['offre', 'candidat']);
             
-            // Prépare les données pour l'email
             $data = [
                 'code_suivi' => $candidature->code,
-                'nom' => $candidature->candidat->user->nom ?? 'Candidat',
-                'prenom' => $candidature->candidat->user->prenom ?? '',
+                'nom' => $candidature->candidat->nom ?? 'Candidat',
+                'prenom' => $candidature->candidat->prenom ?? '',
                 'offre_titre' => $candidature->offre->titre ?? 'Offre',
                 'entreprise' => $candidature->offre->entreprise ?? '',
                 'date_candidature' => $candidature->created_at->format('d/m/Y à H:i'),
             ];
             
-            // Envoie l'email
             Mail::to($email)->send(new CandidatureConfirmation($data));
             
             return true;
         } catch (\Exception $e) {
-            // Log l'erreur mais ne bloque pas le processus
             \Log::error('Erreur envoi email candidature: ' . $e->getMessage());
             return false;
         }
@@ -57,19 +66,14 @@ class CandidatureController extends Controller
         try {
             $data = $request->validate([
                 'offre_id'              => ['required','exists:offres,id'],
-                'candidat_id'           => ['required','exists:candidats,id'],
-
-                // Lettre de motivation (texte OU fichier)
+                'candidat_id'           => ['required','exists:users,id'],
                 'lm_source'             => ['nullable','in:upload,text,none'],
                 'lettre_motivation'     => ['nullable','string','max:5000'],
                 'lettre_motivation_file'=> ['required_if:lm_source,upload','file','mimes:pdf,doc,docx,txt,odt','max:5120'],
-
-                // CV (optionnel)
                 'cv_source'             => ['nullable','in:upload,none,existing'],
                 'cv'                    => ['required_if:cv_source,upload','file','mimes:pdf,doc,docx','max:5120'],
             ]);
 
-            // Anti-doublon
             $exists = Candidature::where('offre_id', $data['offre_id'])
                 ->where('candidat_id', $data['candidat_id'])
                 ->exists();
@@ -78,20 +82,17 @@ class CandidatureController extends Controller
                 return response()->json(['success'=>false,'message'=>'Candidature déjà existante'], 422);
             }
 
-            // Upload CV
             $cvPath = null;
             if (($data['cv_source'] ?? null) === 'upload' && $request->hasFile('cv')) {
                 $cvPath = $request->file('cv')->store('cvs', 'public');
             }
 
-            // Lettre (texte/fichier)
             $lmPath = null;
             $lmSource = $data['lm_source'] ?? 'none';
             if ($lmSource === 'upload' && $request->hasFile('lettre_motivation_file')) {
                 $lmPath = $request->file('lettre_motivation_file')->store('letters', 'public');
             }
 
-            // Payload propre (le code sera généré automatiquement par le Model)
             $payload = [
                 'offre_id'    => $data['offre_id'],
                 'candidat_id' => $data['candidat_id'],
@@ -112,22 +113,20 @@ class CandidatureController extends Controller
             $cand = Candidature::create($payload);
             $cand->loadMissing('offre');
 
-            $candidat = Candidat::with('user')->find($data['candidat_id']);
-            if ($candidat && $candidat->user && $candidat->user->email) {
-                $this->sendConfirmationEmail($cand, $candidat->user->email);
+            $candidat = User::find($data['candidat_id']);
+            if ($candidat && $candidat->email) {
+                $this->sendConfirmationEmail($cand, $candidat->email);
             }
 
-            if ($candidat && $candidat->user) {
+            if ($candidat) {
                 Notification::pushToUsers(
-                    collect([$candidat->user]),
+                    collect([$candidat]),
                     'Candidature envoyée',
                     "Votre candidature a bien été enregistrée.\n\nOffre : " . ($cand->offre?->titre ?? '—') .
                     "\nCode de suivi : {$cand->code}\nSuivre votre dossier : " . frontend_url('suivi-candidature')
-
                 );
             }
 
-            // ✅ Publie UNIQUEMENT des endpoints API stables pour le front
             $cand->cv_url = $cand->cv ? url("api/candidatures/{$cand->id}/download/cv") : null;
 
             $hasLmFile = false;
@@ -659,52 +658,143 @@ class CandidatureController extends Controller
     }
 
     public function mesCandidatures(Request $request, $candidatParamId = null)
-{
-    // 1) Priorité au paramètre de route /mes-candidatures/{candidat}
-    $candidatId = $candidatParamId;
-
-    // 2) Sinon query string ?candidat_id=123
-    if (!$candidatId) {
-        $candidatId = $request->query('candidat_id');
-    }
-
-    // 3) Sinon déduire du user connecté (via Sanctum)
-    if (!$candidatId && $request->user()) {
-        $candidatId = optional($request->user()->candidat)->id;
-    }
-
-    if (!$candidatId) {
-        return response()->json(['success' => false, 'message' => 'candidat_id requis'], 422);
-    }
-
-    $rows = \App\Models\Candidature::where('candidat_id', $candidatId)
-        ->with(['offre'])
-        ->get();
-    
-    // ⬇️ On charge aussi le candidat et son user
-    $rows = Candidature::where('candidat_id', $candidatId)
-        ->with(['candidat.user', 'offre'])
-        ->get();
-
-    return response()->json(['success' => true, 'data' => $rows]);
-}
-
-
-    public function updateStatut(Request $request, $id)
     {
-        $c = Candidature::find($id);
-        if (!$c) return response()->json(['success'=>false,'message'=>'Candidature non trouvée'],404);
+        // 1) Priorité au paramètre de route /mes-candidatures/{candidat}
+        $candidatId = $candidatParamId;
 
-        $request->validate(['statut'=>'required|in:en_attente,acceptee,refusee']);
-        $c->update(['statut'=>$request->statut]);
+        // 2) Sinon query string ?candidat_id=123
+        if (!$candidatId) {
+            $candidatId = $request->query('candidat_id');
+        }
 
-        return response()->json(['success'=>true,'message'=>'Statut mis à jour','data'=>$c]);
+        // 3) Sinon déduire du user connecté (via Sanctum)
+        if (!$candidatId && $request->user()) {
+            // ✅ CORRECTION : candidat_id = user_id (pas candidat->id)
+            $candidatId = $request->user()->id;
+        }
+
+        if (!$candidatId) {
+            return response()->json(['success' => false, 'message' => 'candidat_id requis'], 422);
+        }
+
+        // ✅ Charger les candidatures avec les relations
+        $rows = Candidature::where('candidat_id', $candidatId)
+            ->with(['offre.entreprise'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json(['success' => true, 'data' => $rows]);
     }
 
-    public function getByOffre($offreId)
+    /**
+ * ✅ Mettre à jour le statut d'une candidature (Recruteur ET CM)
+ */
+public function updateStatut(Request $request, $id)
     {
-        $rows = Candidature::where('offre_id',$offreId)->with(['candidat.user','offre'])->get();
-        return response()->json(['success'=>true,'data'=>$rows]);
+        $user = auth()->user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        $candidature = Candidature::with('offre')->find($id);
+        
+        if (!$candidature) {
+            return response()->json(['success' => false, 'message' => 'Candidature non trouvée'], 404);
+        }
+        
+        // ✅ CORRECTION : Récupérer l'entreprise via offre → recruteur → entreprise
+        $entrepriseId = $this->getEntrepriseIdFromOffre($candidature->offre);
+        
+        if (!$entrepriseId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Impossible de déterminer l\'entreprise de cette offre'
+            ], 500);
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise
+        if (!$user->canManageEntreprise($entrepriseId)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas le droit de modifier cette candidature'
+            ], 403);
+        }
+        
+        $request->validate([
+            'statut' => 'required|in:en_attente,acceptee,refusee',
+            'message_statut' => 'nullable|string|max:500'
+        ]);
+        
+        $candidature->update([
+            'statut' => $request->statut,
+            'message_statut' => $request->message_statut ?? null
+        ]);
+        
+        // ✅ Notifier le candidat
+        $candidat = User::find($candidature->candidat_id);
+        if ($candidat) {
+            $statusMessages = [
+                'acceptee' => 'Félicitations ! Votre candidature a été acceptée.',
+                'refusee' => 'Votre candidature n\'a pas été retenue.',
+                'en_attente' => 'Votre candidature est en cours d\'examen.'
+            ];
+            
+            Notification::pushToUsers(
+                collect([$candidat]),
+                'Mise à jour de votre candidature',
+                $statusMessages[$request->statut] . "\nOffre : " . ($candidature->offre?->titre ?? '—')
+            );
+        }
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Statut mis à jour',
+            'data' => $candidature->load('offre')
+        ]);
+    }
+
+    /**
+ * ✅ Récupérer les candidatures d'une offre (avec vérification des droits)
+ */
+public function getByOffre($offreId)
+    {
+        $user = auth()->user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        $offre = Offre::find($offreId);
+        
+        if (!$offre) {
+            return response()->json(['success' => false, 'message' => 'Offre non trouvée'], 404);
+        }
+        
+        // ✅ CORRECTION : Récupérer l'entreprise via offre → recruteur → entreprise
+        $entrepriseId = $this->getEntrepriseIdFromOffre($offre);
+        
+        if (!$entrepriseId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Impossible de déterminer l\'entreprise de cette offre'
+            ], 500);
+        }
+        
+        // ✅ Vérifier les droits sur l'entreprise
+        if (!$user->canManageEntreprise($entrepriseId)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès aux candidatures de cette offre'
+            ], 403);
+        }
+        
+        $rows = Candidature::where('offre_id', $offreId)
+            ->with('offre')
+            ->orderBy('created_at', 'desc')
+            ->get();
+        
+        return response()->json(['success' => true, 'data' => $rows]);
     }
 
     // ===== Helpers =====
@@ -792,100 +882,211 @@ class CandidatureController extends Controller
         return Storage::disk('public')->download($path, basename($path));
     }
 
-     public function candidaturesRecues(Request $request)
-        {
-            try {
-                \Log::info('=== DEBUT candidaturesRecues ===');
-                
-                $user = $request->user();
-                
-                if (!$user) {
-                    return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
-                }
-                
-                if ($user->role !== 'Recruteur') {
-                    return response()->json(['success' => false, 'message' => 'Accès réservé aux recruteurs'], 403);
-                }
-                
-                \Log::info('Récupération des candidatures avec relations...');
-                
-                // Récupérer avec les relations
-                $candidatures = Candidature::whereHas('offre', function($query) use ($user) {
-                    $query->where('recruteur_id', $user->id);
-                })
-                ->with(['offre:id,titre,type_contrat,localisation']) // ✅ Charger offre
-                ->orderBy('created_at', 'desc')
-                ->limit(10)
-                ->get();
-                
-                \Log::info('Candidatures avec offre chargées: ' . $candidatures->count());
-                
-                // Formater les données
-                $formatted = $candidatures->map(function($candidature) {
-                    \Log::info("Traitement candidature ID: {$candidature->id}");
-                    
-                    // Récupérer le candidat (User)
-                    $candidatUser = null;
-                    try {
-                        $candidatUser = \App\Models\User::find($candidature->candidat_id);
-                        \Log::info("Candidat trouvé: " . ($candidatUser ? $candidatUser->email : 'NULL'));
-                    } catch (\Exception $e) {
-                        \Log::error("Erreur chargement candidat: " . $e->getMessage());
-                    }
-                    
-                    return [
-                        'id' => $candidature->id,
-                        'code' => $candidature->code,
-                        'statut' => $candidature->statut,
-                        'created_at' => $candidature->created_at,
-                        
-                        // Infos de l'offre
-                        'offre_titre' => $candidature->offre?->titre ?? 'N/A',
-                        'offre_type_contrat' => $candidature->offre?->type_contrat ?? 'N/A',
-                        'offre_localisation' => $candidature->offre?->localisation ?? 'N/A',
-                        
-                        // Infos du candidat (User)
-                        'candidat_nom' => $candidatUser ? 
-                            trim(($candidatUser->prenom ?? '') . ' ' . ($candidatUser->nom ?? '')) : 
-                            'N/A',
-                        'candidat_email' => $candidatUser?->email ?? 'N/A',
-                        'candidat_telephone' => $candidatUser?->telephone ?? 'N/A',
-                        
-                        // Fichiers
-                        'cv' => $candidature->cv,
-                        'lettre_motivation' => $candidature->lettre_motivation,
-                        'lettre_motivation_fichier' => $candidature->lettre_motivation_fichier,
-                        
-                        // URLs de téléchargement
-                        'cv_url' => $candidature->cv ? 
-                            url("api/candidatures/{$candidature->id}/download/cv") : null,
-                        'lm_url' => ($candidature->lettre_motivation_fichier || 
-                                (isset($candidature->lettre_motivation) && 
-                                    \Str::startsWith($candidature->lettre_motivation, '[file]'))) ? 
-                            url("api/candidatures/{$candidature->id}/download/lm") : null,
-                    ];
-                });
-                
-                \Log::info('=== FIN candidaturesRecues SUCCESS ===');
-                
-                return response()->json([
-                    'success' => true,
-                    'data' => $formatted
-                ]);
-                
-            } catch (\Exception $e) {
-                \Log::error('=== ERREUR candidaturesRecues ===');
-                \Log::error('Message: ' . $e->getMessage());
-                \Log::error('File: ' . $e->getFile());
-                \Log::error('Line: ' . $e->getLine());
-                
+     /**
+ * ✅ Candidatures reçues (Recruteur ET Community Manager)
+ */
+    public function candidaturesRecues(Request $request)
+{
+    try {
+        \Log::info('=== DEBUT candidaturesRecues ===');
+        
+        $user = $request->user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false, 
+                'message' => 'Accès réservé aux recruteurs et community managers'
+            ], 403);
+        }
+        
+        // ✅ Récupérer toutes les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+        
+        if ($entreprises->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [],
+                'message' => 'Aucune entreprise à gérer'
+            ]);
+        }
+        
+        // ✅ NOUVEAU : Si entreprise_id fourni, filtrer par cette entreprise uniquement
+        if ($request->filled('entreprise_id')) {
+            $entrepriseId = (int)$request->input('entreprise_id');
+            
+            // Vérifier que l'utilisateur peut gérer cette entreprise
+            if (!$user->canManageEntreprise($entrepriseId)) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Erreur lors du chargement',
-                    'error' => config('app.debug') ? $e->getMessage() : null
-                ], 500);
+                    'message' => 'Vous n\'avez pas accès à cette entreprise'
+                ], 403);
             }
+            
+            // Filtrer uniquement cette entreprise
+            $entreprises = $entreprises->where('id', $entrepriseId);
+            
+            \Log::info("Filtre par entreprise $entrepriseId");
         }
+        
+        // ✅ Récupérer les user_id (recruteurs) de ces entreprises
+        $recruteurIds = $entreprises->pluck('user_id')->filter()->unique();
+        
+        if ($recruteurIds->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [],
+                'message' => 'Aucun recruteur trouvé'
+            ]);
+        }
+        
+        \Log::info('Recruteurs IDs: ' . $recruteurIds->implode(', '));
+        
+        // ✅ Récupérer les candidatures des offres de ces recruteurs
+        $candidatures = Candidature::whereHas('offre', function($query) use ($recruteurIds) {
+            $query->whereIn('recruteur_id', $recruteurIds);
+        })
+        ->with(['offre:id,titre,type_contrat,localisation,recruteur_id'])
+        ->orderBy('created_at', 'desc')
+        ->paginate(15);
+        
+        \Log::info('Candidatures trouvées: ' . $candidatures->count());
+        
+        // Formater les données
+        $formatted = $candidatures->getCollection()->map(function($candidature) {
+            $candidatUser = \App\Models\User::find($candidature->candidat_id);
+            
+            return [
+                'id' => $candidature->id,
+                'code' => $candidature->code,
+                'statut' => $candidature->statut,
+                'created_at' => $candidature->created_at,
+                
+                'offre_id' => $candidature->offre?->id,
+                'offre_titre' => $candidature->offre?->titre ?? 'N/A',
+                'offre_type_contrat' => $candidature->offre?->type_contrat ?? 'N/A',
+                'offre_localisation' => $candidature->offre?->localisation ?? 'N/A',
+                
+                'candidat_nom' => $candidatUser ? 
+                    trim(($candidatUser->prenom ?? '') . ' ' . ($candidatUser->nom ?? '')) : 
+                    'N/A',
+                'candidat_email' => $candidatUser?->email ?? 'N/A',
+                'candidat_telephone' => $candidatUser?->telephone ?? 'N/A',
+                
+                'cv' => $candidature->cv,
+                'lettre_motivation' => $candidature->lettre_motivation,
+                'lettre_motivation_fichier' => $candidature->lettre_motivation_fichier,
+                
+                'cv_url' => $candidature->cv ? 
+                    url("api/candidatures/{$candidature->id}/download/cv") : null,
+                'lm_url' => ($candidature->lettre_motivation_fichier || 
+                        (isset($candidature->lettre_motivation) && 
+                            \Str::startsWith($candidature->lettre_motivation, '[file]'))) ? 
+                    url("api/candidatures/{$candidature->id}/download/lm") : null,
+            ];
+        });
+        
+        \Log::info('=== FIN candidaturesRecues SUCCESS ===');
+        
+        return response()->json([
+            'success' => true,
+            'data' => $formatted,
+            'meta' => [
+                'current_page' => $candidatures->currentPage(),
+                'last_page' => $candidatures->lastPage(),
+                'per_page' => $candidatures->perPage(),
+                'total' => $candidatures->total(),
+                'entreprises' => $entreprises,
+                'filtered_by_entreprise' => $request->filled('entreprise_id') ? (int)$request->input('entreprise_id') : null
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        \Log::error('=== ERREUR candidaturesRecues ===');
+        \Log::error('Message: ' . $e->getMessage());
+        \Log::error('File: ' . $e->getFile());
+        \Log::error('Line: ' . $e->getLine());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Erreur lors du chargement',
+            'error' => config('app.debug') ? $e->getMessage() : null
+        ], 500);
+    }
+}
 
-    
+    /**
+ * ✅ NOUVEAU : Statistiques des candidatures (Recruteur ET CM)
+ */
+    public function statistiques(Request $request)
+    {
+        $user = $request->user();
+        
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+        }
+        
+        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false, 
+                'message' => 'Accès réservé aux recruteurs et community managers'
+            ], 403);
+        }
+        
+        // ✅ Récupérer toutes les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+        
+        if ($entreprises->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'total' => 0,
+                    'en_attente' => 0,
+                    'acceptees' => 0,
+                    'refusees' => 0,
+                    'nouvelles_7j' => 0,
+                    'nouvelles_30j' => 0,
+                ]
+            ]);
+        }
+        
+        // ✅ Récupérer les user_id (recruteurs) de ces entreprises
+        $recruteurIds = $entreprises->pluck('user_id')->filter()->unique();
+        
+        if ($recruteurIds->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'total' => 0,
+                    'en_attente' => 0,
+                    'acceptees' => 0,
+                    'refusees' => 0,
+                    'nouvelles_7j' => 0,
+                    'nouvelles_30j' => 0,
+                ]
+            ]);
+        }
+        
+        // ✅ CORRECTION : Filtrer par recruteur_id (pas entreprise_id)
+        $query = Candidature::whereHas('offre', function($q) use ($recruteurIds) {
+            $q->whereIn('recruteur_id', $recruteurIds);
+        });
+        
+        $stats = [
+            'total' => $query->count(),
+            'en_attente' => (clone $query)->where('statut', 'en_attente')->count(),
+            'acceptees' => (clone $query)->where('statut', 'acceptee')->count(),
+            'refusees' => (clone $query)->where('statut', 'refusee')->count(),
+            'nouvelles_7j' => (clone $query)->where('created_at', '>=', now()->subDays(7))->count(),
+            'nouvelles_30j' => (clone $query)->where('created_at', '>=', now()->subDays(30))->count(),
+        ];
+        
+        return response()->json([
+            'success' => true,
+            'data' => $stats
+        ]);
+    }  
 }

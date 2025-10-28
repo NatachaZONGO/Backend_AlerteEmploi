@@ -4,6 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Entreprise extends Model
 {
@@ -20,9 +22,9 @@ class Entreprise extends Model
         'telephone',
         'email',
         'secteur_activite',
-        'taille_entreprise',      // ✅ AJOUTÉ
-        'adresse',                // ✅ AJOUTÉ
-        'ville',                  // ✅ AJOUTÉ
+        'taille_entreprise',
+        'adresse',
+        'ville',
         'logo',
         'pays_id',
         'statut',
@@ -45,6 +47,36 @@ class Entreprise extends Model
         return $this->belongsTo(Pays::class); 
     }
 
+    /**
+     * ✅ Les Community Managers assignés à cette entreprise
+     */
+    public function communityManagers(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            User::class,
+            'community_manager_entreprises',
+            'entreprise_id',
+            'user_id'
+        )->withTimestamps();
+    }
+
+    /**
+     * ✅ Les offres de cette entreprise
+     * Via le recruteur (user_id de l'entreprise = recruteur_id des offres)
+     */
+    public function offres(): HasMany
+    {
+        return $this->hasMany(Offre::class, 'recruteur_id', 'user_id');
+    }
+
+    /**
+     * ✅ Vérifier si un utilisateur peut gérer cette entreprise
+     */
+    public function canBeManagedBy(User $user): bool
+    {
+        return $user->canManageEntreprise($this->id);
+    }
+
     // Accesseurs pour compatibilité
     public function setSiteWebAttribute($value) 
     { 
@@ -52,7 +84,7 @@ class Entreprise extends Model
     }
     
     public function getSiteWebAttribute() 
-    { 
+    {
         return $this->attributes['site_web'] ?? null; 
     }
 

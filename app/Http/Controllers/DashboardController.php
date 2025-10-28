@@ -25,6 +25,11 @@ class DashboardController extends Controller
                 return $this->recruteurStats($user);
             }
 
+            // ✅ NOUVEAU : Community Manager
+            if (strcasecmp($roleName, 'community_manager') === 0) {
+                return $this->communityManagerStats($user, $request);
+            }
+
             if (strcasecmp($roleName, 'Candidat') === 0) {
                 return $this->candidatStats($user);
             }
@@ -46,7 +51,6 @@ class DashboardController extends Controller
      */
     private function adminStats()
     {
-        // users_online: ne calcule que si la colonne existe
         $usersOnline = 0;
         if (Schema::hasColumn('users', 'last_activity')) {
             $usersOnline = User::where('last_activity', '>=', Carbon::now()->subMinutes(5))->count();
@@ -81,7 +85,6 @@ class DashboardController extends Controller
                 })
                 ->values(),
 
-            // à remplir plus tard si tu veux des tops
             'top_entreprises' => [],
         ];
 
@@ -93,11 +96,8 @@ class DashboardController extends Controller
      */
     private function recruteurStats(User $user)
     {
-        // On passe par la relation si elle existe
-        $entreprise = $user->entreprise;
+        $entreprise = $user->entreprise()->first();
 
-        // Si le recruteur n’a pas encore d’entreprise validée/associée,
-        // renvoyer des zéros plutôt qu’un 404 (évite le 500 côté front).
         if (!$entreprise) {
             $empty = [
                 'total_offres'           => 0,
@@ -114,12 +114,10 @@ class DashboardController extends Controller
             return response()->json(['success' => true, 'data' => $empty]);
         }
 
-        // Offres du recruteur (selon ton schéma: recruteur_id = user.id)
         $totalOffres      = Offre::where('recruteur_id', $user->id)->count();
         $offresPubliees   = Offre::where('recruteur_id', $user->id)
                                 ->where('statut', 'publiee')
                                 ->where(function ($q) {
-                                    // protège si la colonne n’existe pas
                                     if (Schema::hasColumn('offres', 'date_expiration')) {
                                         $q->where('date_expiration', '>', now());
                                     }
@@ -132,10 +130,8 @@ class DashboardController extends Controller
                                 ->where('statut', 'brouillon')
                                 ->count();
 
-        // Publicités de l’entreprise
         $totalPublicites  = Publicite::where('entreprise_id', $entreprise->id)->count();
 
-        // Candidatures reçues sur SES offres
         $candidBase = Candidature::whereHas('offre', function ($q) use ($user) {
             $q->where('recruteur_id', $user->id);
         });
@@ -174,7 +170,117 @@ class DashboardController extends Controller
             'candidatures_refusees'  => $candsRefusees,
 
             'recent_offres'          => $recentOffres,
-            'top_entreprises'        => [], // pas pertinent pour recruteur
+            'top_entreprises'        => [],
+        ];
+
+        return response()->json(['success' => true, 'data' => $stats]);
+    }
+
+    /**
+     * ✅ NOUVEAU : Statistiques COMMUNITY MANAGER
+     */
+    private function communityManagerStats(User $user, Request $request)
+    {
+        // Récupérer toutes les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+        
+        // ✅ Si entreprise_id fourni, filtrer par cette entreprise uniquement
+        if ($request->filled('entreprise_id')) {
+            $entrepriseId = (int)$request->input('entreprise_id');
+            
+            // Vérifier que l'utilisateur peut gérer cette entreprise
+            if (!$user->canManageEntreprise($entrepriseId)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Vous n\'avez pas accès à cette entreprise'
+                ], 403);
+            }
+            
+            $entreprises = $entreprises->where('id', $entrepriseId);
+            \Log::info("Stats CM filtrées par entreprise $entrepriseId");
+        }
+        
+        if ($entreprises->isEmpty()) {
+            $empty = [
+                'total_offres'           => 0,
+                'offres_publiees'        => 0,
+                'offres_en_attente'      => 0,
+                'offres_brouillon'       => 0,
+                'total_publicites'       => 0,
+                'total_candidatures'     => 0,
+                'candidatures_en_cours'  => 0,
+                'candidatures_acceptees' => 0,
+                'candidatures_refusees'  => 0,
+                'recent_offres'          => [],
+            ];
+            return response()->json(['success' => true, 'data' => $empty]);
+        }
+        
+        // ✅ Récupérer les user_id (recruteurs) de ces entreprises
+        $recruteurIds = $entreprises->pluck('user_id')->filter()->unique();
+        $entrepriseIds = $entreprises->pluck('id');
+        
+        // Stats des offres
+        $totalOffres      = Offre::whereIn('recruteur_id', $recruteurIds)->count();
+        $offresPubliees   = Offre::whereIn('recruteur_id', $recruteurIds)
+                                ->where('statut', 'publiee')
+                                ->where(function ($q) {
+                                    if (Schema::hasColumn('offres', 'date_expiration')) {
+                                        $q->where('date_expiration', '>', now());
+                                    }
+                                })
+                                ->count();
+        $offresEnAttente  = Offre::whereIn('recruteur_id', $recruteurIds)
+                                ->where('statut', 'en_attente_validation')
+                                ->count();
+        $offresBrouillon  = Offre::whereIn('recruteur_id', $recruteurIds)
+                                ->where('statut', 'brouillon')
+                                ->count();
+
+        // Stats des publicités
+        $totalPublicites  = Publicite::whereIn('entreprise_id', $entrepriseIds)->count();
+
+        // Stats des candidatures
+        $candidBase = Candidature::whereHas('offre', function ($q) use ($recruteurIds) {
+            $q->whereIn('recruteur_id', $recruteurIds);
+        });
+
+        $totalCands      = (clone $candidBase)->count();
+        $candsEnCours    = (clone $candidBase)->whereIn('statut', ['en_attente', 'en_cours'])->count();
+        $candsAcceptees  = (clone $candidBase)->where('statut', 'acceptee')->count();
+        $candsRefusees   = (clone $candidBase)->where('statut', 'refusee')->count();
+
+        // Offres récentes
+        $recentOffres = Offre::whereIn('recruteur_id', $recruteurIds)
+            ->withCount('candidatures')
+            ->latest()
+            ->take(5)
+            ->get()
+            ->map(function ($offre) {
+                return [
+                    'titre'             => $offre->titre,
+                    'statut'            => $offre->statut,
+                    'date_publication'  => $offre->date_publication,
+                    'candidatures_count'=> $offre->candidatures_count,
+                ];
+            })
+            ->values();
+
+        $stats = [
+            'total_offres'           => $totalOffres,
+            'offres_publiees'        => $offresPubliees,
+            'offres_en_attente'      => $offresEnAttente,
+            'offres_brouillon'       => $offresBrouillon,
+
+            'total_publicites'       => $totalPublicites,
+
+            'total_candidatures'     => $totalCands,
+            'candidatures_en_cours'  => $candsEnCours,
+            'candidatures_acceptees' => $candsAcceptees,
+            'candidatures_refusees'  => $candsRefusees,
+
+            'recent_offres'          => $recentOffres,
+            'top_entreprises'        => [],
         ];
 
         return response()->json(['success' => true, 'data' => $stats]);
@@ -185,9 +291,6 @@ class DashboardController extends Controller
      */
     private function candidatStats(User $user)
     {
-        // Selon ton schéma : la table candidatures référence le candidat.
-        // Si la FK est "candidat_id" pointant vers users.id => OK
-        // Sinon, adapte (ex: via $user->candidat->id).
         $candidatId = $user->id;
 
         $totalCands      = Candidature::where('candidat_id', $candidatId)->count();
@@ -217,7 +320,6 @@ class DashboardController extends Controller
             'candidatures_refusees'  => $candsRefusees,
             'recent_offres'          => $recentOffres,
 
-            // pour garder le même shape que l’UI (non affichés pour candidat)
             'total_users'            => 0,
             'users_online'           => 0,
             'total_entreprises'      => 0,

@@ -4,6 +4,7 @@ use Illuminate\Http\Request;
 use App\Models\Entreprise;
 use App\Models\Offre;
 use App\Models\Publicite;
+use Illuminate\Support\Facades\Storage;
 
 class MonEntrepriseController extends Controller
 {

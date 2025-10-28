@@ -355,4 +355,70 @@ public function revalidateEntrepriseByCompanyId($id)
     ]);
 }
 
+    /**
+ * ✅ Statistiques d'une entreprise spécifique (pour CM)
+ */
+public function entrepriseStats(Request $request, $id)
+{
+    $entreprise = Entreprise::findOrFail($id);
+    
+    // Vérifier que le CM a accès à cette entreprise
+    $user = $request->user();
+    if ($user->hasRole('community_manager')) {
+        $hasAccess = $user->entreprisesGerees()->where('entreprises.id', $id)->exists();
+        if (!$hasAccess) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
+        }
+    }
+    
+    $stats = [
+        'total_offres' => Offre::where('entreprise_id', $id)->count(),
+        'offres_actives' => Offre::where('entreprise_id', $id)->where('statut', 'publiee')->count(),
+        'offres_brouillon' => Offre::where('entreprise_id', $id)->where('statut', 'brouillon')->count(),
+        'total_publicites' => Publicite::where('entreprise_id', $id)->count(),
+        'publicites_actives' => Publicite::where('entreprise_id', $id)->where('statut', 'active')->count(),
+        'candidatures_recues' => Candidature::whereHas('offre', function($q) use ($id) {
+            $q->where('entreprise_id', $id);
+        })->count(),
+    ];
+    
+    return response()->json([
+        'success' => true,
+        'data' => $stats
+    ]);
+}
+
+/**
+ * ✅ NOUVEAU : Récupérer les entreprises gérées par le CM connecté
+ */
+public function mesEntreprisesGerees(Request $request)
+{
+    $user = $request->user();
+    
+    if (!$user) {
+        return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+    }
+    
+    // ✅ Vérifier que c'est un CM
+    if (!$user->hasRole('community_manager')) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Accès réservé aux community managers'
+        ], 403);
+    }
+    
+    // ✅ Récupérer les entreprises gérées
+    $entreprises = $user->entreprisesGerees()
+        ->with(['pays'])
+        ->orderBy('nom_entreprise')
+        ->get();
+    
+    return response()->json([
+        'success' => true,
+        'data' => $entreprises
+    ]);
+}
 }

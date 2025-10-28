@@ -18,7 +18,7 @@ class User extends Authenticatable implements MustVerifyEmail
 {
     use HasApiTokens, HasFactory, Notifiable;
 
-    /** On expose un rôle “principal” dérivé de la relation roles */
+    /** On expose un rôle "principal" dérivé de la relation roles */
     protected $appends = ['role', 'role_id'];
 
     protected $fillable = [
@@ -50,19 +50,17 @@ class User extends Authenticatable implements MustVerifyEmail
 
     public function roles(): BelongsToMany
     {
-        
         return $this->belongsToMany(Role::class, 'role_user', 'user_id', 'role_id');
     }
 
     public function hasRole(string $role): bool
     {
-        return $this->roles()->where('nom', $role)->exists();
+        return $this->roles()->where('nom', 'LIKE', $role)->exists();
     }
 
     /** Accessor: rôle principal (1er rôle lié) */
     public function getRoleAttribute(): ?string
     {
-        // Si la relation n’est pas chargée, on évite une requête en cascade
         $role = $this->relationLoaded('roles')
             ? $this->roles->first()
             : $this->roles()->first();
@@ -87,18 +85,117 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->hasOne(Candidat::class);
     }
 
+    /**
+     * Entreprise du recruteur (propriétaire)
+     */
     public function entreprise(): HasOne
     {
         return $this->hasOne(Entreprise::class);
     }
 
-    // Offres postées (recruteur)
+    /**
+     * Un CM peut gérer plusieurs entreprises
+     */
+    public function entreprisesGerees(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            Entreprise::class,
+            'community_manager_entreprises',
+            'user_id',
+            'entreprise_id'
+        )->withTimestamps();
+    }
+
     public function offres(): HasMany
     {
         return $this->hasMany(Offre::class, 'recruteur_id');
     }
 
+    // ================== GESTION DES ENTREPRISES (RECRUTEUR + CM) ==================
+
+    /**
+     * ✅ Vérifier si l'utilisateur peut gérer une entreprise donnée
+     * 
+     * @param int $entrepriseId
+     * @return bool
+     */
+    public function canManageEntreprise(int $entrepriseId): bool
+    {
+        // Cas 1 : Administrateur peut tout gérer
+        if ($this->hasRole('administrateur') || $this->hasRole('Administrateur')) {
+            return true;
+        }
+
+        // Cas 2 : Recruteur propriétaire de l'entreprise
+        if ($this->hasRole('recruteur') || $this->hasRole('Recruteur')) {
+            // ✅ CORRECTION : Vérifier via la relation ou requête
+            return $this->entreprise()->where('id', $entrepriseId)->exists();
+        }
+
+        // Cas 3 : Community Manager assigné à cette entreprise
+        if ($this->hasRole('community_manager')) {
+            return $this->entreprisesGerees()->where('entreprises.id', $entrepriseId)->exists();
+        }
+
+        return false;
+    }
+
+    /**
+     * ✅ Récupérer toutes les entreprises que l'utilisateur peut gérer
+     * 
+     * @return \Illuminate\Support\Collection
+     */
+    public function getManageableEntreprises()
+    {
+        // Administrateur : toutes les entreprises
+        if ($this->hasRole('administrateur') || $this->hasRole('Administrateur')) {
+            return Entreprise::all();
+        }
+
+        // Recruteur : uniquement sa propre entreprise
+        if ($this->hasRole('recruteur') || $this->hasRole('Recruteur')) {
+            // ✅ CORRECTION : Charger la relation et retourner une collection
+            $entreprise = $this->entreprise()->first();
+            return $entreprise ? collect([$entreprise]) : collect();
+        }
+
+        // Community Manager : entreprises assignées
+        if ($this->hasRole('community_manager')) {
+            return $this->entreprisesGerees;
+        }
+
+        // Autres rôles : aucune entreprise
+        return collect();
+    }
+
+
+    /**
+     * ✅ Vérifier si l'utilisateur a au moins une entreprise à gérer
+     * 
+     * @return bool
+     */
+    public function hasManageableEntreprises(): bool
+    {
+        return $this->getManageableEntreprises()->isNotEmpty();
+    }
+    /**
+     * ✅ Récupérer l'entreprise principale de l'utilisateur
+     */
+    public function getPrimaryEntreprise(): ?Entreprise
+    {
+        if ($this->hasRole('recruteur') || $this->hasRole('Recruteur')) {
+            return $this->entreprise()->first();
+        }
+
+        if ($this->hasRole('community_manager')) {
+            return $this->entreprisesGerees()->first();
+        }
+
+        return null;
+    }
+
     // ================== NOTIFICATIONS ==================
+
     public function notifications(): BelongsToMany
     {
         return $this->belongsToMany(Notification::class, 'notification_users')
@@ -116,7 +213,6 @@ class User extends Authenticatable implements MustVerifyEmail
                 'nombre_ouvertures',
                 'temps_lecture_seconde',
                 'action_effectuee',
-                
             ])
             ->withTimestamps();
     }
@@ -131,5 +227,4 @@ class User extends Authenticatable implements MustVerifyEmail
     {
         return $this->hasMany(Notification::class, 'auteur_id');
     }
-    
 }

@@ -7,10 +7,14 @@ use App\Models\User;
 use App\Models\Role;
 use App\Models\Candidat;
 use App\Models\Entreprise;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
@@ -171,7 +175,7 @@ class AuthController extends Controller
     }
 
     /**
-     * Connexion
+     * ✅ Connexion (avec gestion Community Manager)
      */
     public function login(Request $request)
     {
@@ -204,7 +208,7 @@ class AuthController extends Controller
             ], 403);
         }
 
-        // Cas particulier recruteur : entreprise non validée → blocage
+        // ✅ Cas recruteur : vérifier entreprise validée
         if ($user->hasRole('recruteur')) {
             $entreprise = $user->entreprise ?? null;
             if (!$entreprise || $entreprise->statut !== 'valide') {
@@ -215,17 +219,28 @@ class AuthController extends Controller
             }
         }
 
+        // ✅ Cas Community Manager : vérifier qu'il a au moins une entreprise assignée
+        if ($user->hasRole('community_manager')) {
+            if ($user->entreprisesGerees()->count() === 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aucune entreprise assignée. Contactez l\'administrateur.'
+                ], 403);
+            }
+        }
+
         // ✅ Mettre à jour la dernière connexion
-        $user->update([
-            'last_login' => now()
-        ]);
+        $user->update(['last_login' => now()]);
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
-        // Charger les rôles pour exposer 'roles', 'role', 'role_id'
-        $user->load('roles:id,nom');
+        // Charger les relations nécessaires
+        $user->load(['roles:id,nom', 'entreprise', 'entreprisesGerees']);
 
-        // Réponse alignée avec le front: token + user en racine
+        // ✅ Récupérer les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
+
+        // Réponse enrichie avec les entreprises
         return response()->json([
             'success'    => true,
             'message'    => 'Connexion réussie',
@@ -233,6 +248,8 @@ class AuthController extends Controller
             'token_type' => 'Bearer',
             'user'       => $user,
             'roles'      => $user->roles->pluck('nom')->values(),
+            // ✅ Ajouter les entreprises gérables
+            'entreprises' => $entreprises,
         ]);
     }
 
@@ -250,60 +267,256 @@ class AuthController extends Controller
     }
 
     /**
-     * Profil connecté
+     * ✅ Profil connecté (avec entreprises gérables)
      */
     public function me(Request $request)
     {
-        $user = $request->user()->load('roles:id,nom');
+        $user = $request->user()->load(['roles:id,nom', 'entreprise', 'entreprisesGerees']);
+
+        // ✅ Récupérer les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
 
         return response()->json([
             'success' => true,
             'data'    => [
-                'user'  => $user,                               // contient 'role' et 'role_id'
-                'roles' => $user->roles->pluck('nom')->values(), // ex: ["Administrateur"]
+                'user'        => $user,
+                'roles'       => $user->roles->pluck('nom')->values(),
+                // ✅ Ajouter les entreprises gérables
+                'entreprises' => $entreprises,
             ]
         ]);
     }
 
     /**
-     * (Optionnel) Métadonnées pour le dashboard unique
+     * ✅ Dashboard avec flags Community Manager
      */
     public function dashboard(Request $request)
     {
-        $user  = $request->user()->load('roles:id,nom');
+        $user  = $request->user()->load(['roles:id,nom', 'entreprise', 'entreprisesGerees']);
         $roles = $user->roles->pluck('nom');
 
+        // ✅ Flags de permissions avec Community Manager
         $flags = [
-            'can_manage_users'       => $roles->contains('Administrateur'),
-            'can_manage_entreprises' => $roles->contains('Administrateur'),
-            'can_manage_offres'      => $roles->contains('Administrateur') || $roles->contains('Recruteur'),
-            'can_apply'              => $roles->contains('Candidat'),
+            'can_manage_users'       => $roles->contains('administrateur'),
+            'can_manage_entreprises' => $roles->contains('administrateur'),
+            'can_manage_offres'      => $roles->contains('administrateur') 
+                                     || $roles->contains('recruteur') 
+                                     || $roles->contains('community_manager'), // ✅ NOUVEAU
+            'can_apply'              => $roles->contains('candidat'),
+            'can_manage_content'     => $roles->contains('administrateur') 
+                                     || $roles->contains('community_manager'), // ✅ NOUVEAU
+            'can_moderate'           => $roles->contains('administrateur') 
+                                     || $roles->contains('community_manager'), // ✅ NOUVEAU
         ];
+
+        // ✅ Récupérer les entreprises gérables
+        $entreprises = $user->getManageableEntreprises();
 
         return response()->json([
             'success' => true,
             'data'    => [
-                'user'   => $user,
-                'roles'  => $roles->values(),
-                'flags'  => $flags,
+                'user'        => $user,
+                'roles'       => $roles->values(),
+                'flags'       => $flags,
+                'entreprises' => $entreprises, // ✅ NOUVEAU
             ]
         ]);
     }
 
     /**
      * Mappe "roles" depuis l'input (string ou array) vers les IDs en base.
-     * Exemple: "Administrateur" -> [id]. $default est utilisé si rien n'est fourni.
      */
     private function resolveRoleIdsFromInput(Request $request, array $default = []): array
     {
-        $input = $request->input('roles', $default); // "Administrateur" ou ["Administrateur"]
+        $input = $request->input('roles', $default);
         $names = is_array($input) ? $input : [$input];
 
         $lc = collect($names)
             ->filter()
             ->map(fn($r) => mb_strtolower(trim((string)$r)));
 
-        // Requête case-insensitive sur la colonne nom
         return Role::whereIn(DB::raw('LOWER(nom)'), $lc)->pluck('id')->all();
+    }
+
+    /**
+     * ✅ DEMANDER LA RÉINITIALISATION DU MOT DE PASSE
+     */
+    public function forgotPassword(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email|exists:users,email',
+        ], [
+            'email.required' => 'L\'adresse email est requise.',
+            'email.email' => 'L\'adresse email doit être valide.',
+            'email.exists' => 'Aucun compte n\'est associé à cette adresse email.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation échouée',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $email = $request->email;
+        $token = Str::random(64);
+
+        DB::table('password_reset_tokens')->where('email', $email)->delete();
+
+        DB::table('password_reset_tokens')->insert([
+            'email' => $email,
+            'token' => Hash::make($token),
+            'created_at' => now()
+        ]);
+
+        $user = User::where('email', $email)->first();
+
+        $frontendUrl = env('FRONTEND_URL', 'http://localhost:4200');
+        $resetUrl = $frontendUrl . '/reset-password?token=' . $token . '&email=' . urlencode($email);
+
+        try {
+            Mail::send('emails.reset-password', [
+                'user' => $user,
+                'resetUrl' => $resetUrl,
+                'token' => $token
+            ], function ($message) use ($user) {
+                $message->to($user->email, $user->prenom . ' ' . $user->nom)
+                        ->subject('Réinitialisation de votre mot de passe - AlertEmploi');
+            });
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Un email de réinitialisation a été envoyé à votre adresse.',
+            ], 200);
+
+        } catch (\Exception $e) {
+            \Log::error('Erreur envoi email réinitialisation: ' . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Erreur lors de l\'envoi de l\'email. Veuillez réessayer.',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ RÉINITIALISER LE MOT DE PASSE
+     */
+    public function resetPassword(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'token' => 'required|string',
+            'email' => 'required|email|exists:users,email',
+            'password' => 'required|string|min:8|confirmed',
+        ], [
+            'token.required' => 'Le token est requis.',
+            'email.required' => 'L\'email est requis.',
+            'email.exists' => 'Aucun compte trouvé avec cette adresse email.',
+            'password.required' => 'Le mot de passe est requis.',
+            'password.min' => 'Le mot de passe doit contenir au moins 8 caractères.',
+            'password.confirmed' => 'Les mots de passe ne correspondent pas.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation échouée',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $passwordReset = DB::table('password_reset_tokens')
+            ->where('email', $request->email)
+            ->first();
+
+        if (!$passwordReset) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token invalide ou expiré.'
+            ], 400);
+        }
+
+        if (!Hash::check($request->token, $passwordReset->token)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token invalide.'
+            ], 400);
+        }
+
+        $createdAt = \Carbon\Carbon::parse($passwordReset->created_at);
+        if ($createdAt->addMinutes(60)->isPast()) {
+            DB::table('password_reset_tokens')->where('email', $request->email)->delete();
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Le lien de réinitialisation a expiré. Veuillez faire une nouvelle demande.'
+            ], 400);
+        }
+
+        $user = User::where('email', $request->email)->first();
+        $user->password = Hash::make($request->password);
+        $user->save();
+
+        DB::table('password_reset_tokens')->where('email', $request->email)->delete();
+        $user->tokens()->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Votre mot de passe a été réinitialisé avec succès. Vous pouvez maintenant vous connecter.'
+        ], 200);
+    }
+
+    /**
+     * ✅ VÉRIFIER SI UN TOKEN EST VALIDE
+     */
+    public function verifyResetToken(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'token' => 'required|string',
+            'email' => 'required|email',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation échouée',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $passwordReset = DB::table('password_reset_tokens')
+            ->where('email', $request->email)
+            ->first();
+
+        if (!$passwordReset) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token invalide ou expiré.'
+            ], 400);
+        }
+
+        if (!Hash::check($request->token, $passwordReset->token)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Token invalide.'
+            ], 400);
+        }
+
+        $createdAt = \Carbon\Carbon::parse($passwordReset->created_at);
+        if ($createdAt->addMinutes(60)->isPast()) {
+            DB::table('password_reset_tokens')->where('email', $request->email)->delete();
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Le token a expiré.'
+            ], 400);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Token valide.'
+        ], 200);
     }
 }
