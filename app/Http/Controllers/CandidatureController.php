@@ -5,6 +5,7 @@ use App\Models\Candidature;
 use App\Models\Candidat;
 use App\Models\User;
 use App\Models\Pays;
+use App\Models\Offre;
 use App\Mail\CandidatureConfirmation;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -61,93 +62,191 @@ class CandidatureController extends Controller
         }
     }
 
-    public function store(Request $request)
-    {
-        try {
-            $data = $request->validate([
-                'offre_id'              => ['required','exists:offres,id'],
-                'candidat_id'           => ['required','exists:users,id'],
-                'lm_source'             => ['nullable','in:upload,text,none'],
-                'lettre_motivation'     => ['nullable','string','max:5000'],
-                'lettre_motivation_file'=> ['required_if:lm_source,upload','file','mimes:pdf,doc,docx,txt,odt','max:5120'],
-                'cv_source'             => ['nullable','in:upload,none,existing'],
-                'cv'                    => ['required_if:cv_source,upload','file','mimes:pdf,doc,docx','max:5120'],
-            ]);
 
-            $exists = Candidature::where('offre_id', $data['offre_id'])
-                ->where('candidat_id', $data['candidat_id'])
-                ->exists();
-
-            if ($exists) {
-                return response()->json(['success'=>false,'message'=>'Candidature déjà existante'], 422);
-            }
-
-            $cvPath = null;
-            if (($data['cv_source'] ?? null) === 'upload' && $request->hasFile('cv')) {
-                $cvPath = $request->file('cv')->store('cvs', 'public');
-            }
-
-            $lmPath = null;
-            $lmSource = $data['lm_source'] ?? 'none';
-            if ($lmSource === 'upload' && $request->hasFile('lettre_motivation_file')) {
-                $lmPath = $request->file('lettre_motivation_file')->store('letters', 'public');
-            }
-
-            $payload = [
-                'offre_id'    => $data['offre_id'],
-                'candidat_id' => $data['candidat_id'],
-                'statut'      => 'en_attente',
-                'cv'          => $cvPath,
-            ];
-
-            if ($lmPath) {
-                if (Schema::hasColumn('candidatures', 'lettre_motivation_fichier')) {
-                    $payload['lettre_motivation_fichier'] = $lmPath;
-                } else {
-                    $payload['lettre_motivation'] = '[file] ' . $lmPath;
-                }
-            } elseif (!empty($data['lettre_motivation'])) {
-                $payload['lettre_motivation'] = $data['lettre_motivation'];
-            }
-
-            $cand = Candidature::create($payload);
-            $cand->loadMissing('offre');
-
-            $candidat = User::find($data['candidat_id']);
-            if ($candidat && $candidat->email) {
-                $this->sendConfirmationEmail($cand, $candidat->email);
-            }
-
-            if ($candidat) {
-                Notification::pushToUsers(
-                    collect([$candidat]),
-                    'Candidature envoyée',
-                    "Votre candidature a bien été enregistrée.\n\nOffre : " . ($cand->offre?->titre ?? '—') .
-                    "\nCode de suivi : {$cand->code}\nSuivre votre dossier : " . frontend_url('suivi-candidature')
-                );
-            }
-
-            $cand->cv_url = $cand->cv ? url("api/candidatures/{$cand->id}/download/cv") : null;
-
-            $hasLmFile = false;
-            if (Schema::hasColumn('candidatures', 'lettre_motivation_fichier') && !empty($cand->lettre_motivation_fichier)) {
-                $hasLmFile = true;
-            } elseif (!empty($cand->lettre_motivation) && Str::startsWith((string)$cand->lettre_motivation, '[file] ')) {
-                $hasLmFile = true;
-            }
-            $cand->lm_url = $hasLmFile ? url("api/candidatures/{$cand->id}/download/lm") : null;
-
+    /**
+ * ✅ CORRIGÉ : Créer une candidature (utilisateur connecté)
+ */
+public function store(Request $request)
+{
+    try {
+        \Log::info('=== DEBUT store() candidature ===');
+        \Log::info('Données reçues:', $request->all());
+        
+        // ✅ Récupérer l'utilisateur connecté
+        $user = $request->user();
+        
+        if (!$user) {
             return response()->json([
-                'success' => true,
-                'message' => 'Candidature créée avec succès',
-                'code_suivi' => $cand->code,
-                'data'    => $cand
-            ], 201);
-
-        } catch (\Exception $e) {
-            return response()->json(['success'=>false,'message'=>'Erreur: '.$e->getMessage()],500);
+                'success' => false,
+                'message' => 'Vous devez être connecté pour postuler'
+            ], 401);
         }
+        
+        \Log::info('Utilisateur connecté:', ['id' => $user->id, 'email' => $user->email]);
+        
+        // ✅ CORRECTION : candidat_id est optionnel, on le déduit de l'utilisateur connecté
+        $data = $request->validate([
+            'offre_id'              => ['required', 'exists:offres,id'],
+            
+            // Lettre de motivation (optionnelle)
+            'lm_source'             => ['nullable', 'in:upload,text,none'],
+            'lettre_motivation'     => ['nullable', 'string', 'max:5000'],
+            'lettre_motivation_file'=> ['nullable', 'file', 'mimes:pdf,doc,docx,txt,odt', 'max:5120'],
+            
+            // CV (obligatoire SAUF si cv_source=existing)
+            'cv_source'             => ['nullable', 'in:upload,none,existing'],
+            'cv'                    => ['nullable', 'file', 'mimes:pdf,doc,docx', 'max:5120'],
+        ], [
+            'offre_id.required' => 'L\'offre est requise',
+            'offre_id.exists' => 'Cette offre n\'existe pas',
+            'cv.mimes' => 'Le CV doit être un fichier PDF, DOC ou DOCX',
+            'cv.max' => 'Le CV ne doit pas dépasser 5 Mo',
+        ]);
+        
+        // ✅ Utiliser l'ID de l'utilisateur connecté comme candidat_id
+        $candidatId = $user->id;
+        
+        \Log::info('Candidat ID déduit:', ['candidat_id' => $candidatId]);
+        
+        // ✅ Vérifier qu'on a bien un CV (upload OU existing)
+        $cvSource = $data['cv_source'] ?? 'upload';
+        
+        if ($cvSource === 'upload' && !$request->hasFile('cv')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Le CV est obligatoire. Veuillez uploader votre CV.',
+                'errors' => ['cv' => ['Le CV est requis']]
+            ], 422);
+        }
+        
+        if ($cvSource === 'existing') {
+            // Vérifier que le candidat a déjà un CV dans son profil
+            $candidat = Candidat::where('user_id', $candidatId)->first();
+            if (!$candidat || !$candidat->cv) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aucun CV trouvé dans votre profil. Veuillez en uploader un.',
+                    'errors' => ['cv' => ['Aucun CV existant trouvé']]
+                ], 422);
+            }
+        }
+
+        // ✅ Vérifier doublon
+        $exists = Candidature::where('offre_id', $data['offre_id'])
+            ->where('candidat_id', $candidatId)
+            ->exists();
+
+        if ($exists) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous avez déjà postulé à cette offre'
+            ], 422);
+        }
+
+        // ✅ Upload CV si fourni
+        $cvPath = null;
+        if ($cvSource === 'upload' && $request->hasFile('cv')) {
+            $cvPath = $request->file('cv')->store('cvs', 'public');
+            \Log::info('CV uploadé:', ['path' => $cvPath]);
+        } elseif ($cvSource === 'existing') {
+            // Récupérer le CV existant du candidat
+            $candidat = Candidat::where('user_id', $candidatId)->first();
+            $cvPath = $candidat->cv ?? null;
+            \Log::info('CV existant utilisé:', ['path' => $cvPath]);
+        }
+
+        // ✅ Upload lettre de motivation si fournie
+        $lmPath = null;
+        $lmSource = $data['lm_source'] ?? 'none';
+        
+        if ($lmSource === 'upload' && $request->hasFile('lettre_motivation_file')) {
+            $lmPath = $request->file('lettre_motivation_file')->store('letters', 'public');
+            \Log::info('Lettre motivation uploadée:', ['path' => $lmPath]);
+        }
+
+        // ✅ Créer la candidature
+        $payload = [
+            'offre_id'    => $data['offre_id'],
+            'candidat_id' => $candidatId, // ✅ Utilisateur connecté
+            'statut'      => 'en_attente',
+            'cv'          => $cvPath,
+        ];
+
+        // Ajouter la lettre de motivation
+        if ($lmPath) {
+            if (Schema::hasColumn('candidatures', 'lettre_motivation_fichier')) {
+                $payload['lettre_motivation_fichier'] = $lmPath;
+            } else {
+                $payload['lettre_motivation'] = '[file] ' . $lmPath;
+            }
+        } elseif (!empty($data['lettre_motivation'])) {
+            $payload['lettre_motivation'] = $data['lettre_motivation'];
+        }
+
+        \Log::info('Création candidature avec payload:', $payload);
+
+        $cand = Candidature::create($payload);
+        $cand->loadMissing('offre');
+
+        // ✅ Envoyer email de confirmation
+        if ($user->email) {
+            $this->sendConfirmationEmail($cand, $user->email);
+        }
+
+        // ✅ Notification au candidat
+        Notification::pushToUsers(
+            collect([$user]),
+            'Candidature envoyée',
+            "Votre candidature a bien été enregistrée.\n\nOffre : " . ($cand->offre?->titre ?? '—') .
+            "\nCode de suivi : {$cand->code}\nSuivre votre dossier : " . url('/suivi-candidature')
+        );
+
+        // ✅ URLs de téléchargement
+        $cand->cv_url = $cand->cv ? url("api/candidatures/{$cand->id}/download/cv") : null;
+
+        $hasLmFile = false;
+        if (Schema::hasColumn('candidatures', 'lettre_motivation_fichier') && !empty($cand->lettre_motivation_fichier)) {
+            $hasLmFile = true;
+        } elseif (!empty($cand->lettre_motivation) && Str::startsWith((string)$cand->lettre_motivation, '[file] ')) {
+            $hasLmFile = true;
+        }
+        $cand->lm_url = $hasLmFile ? url("api/candidatures/{$cand->id}/download/lm") : null;
+
+        \Log::info('✅ Candidature créée avec succès:', ['id' => $cand->id, 'code' => $cand->code]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Candidature créée avec succès',
+            'code_suivi' => $cand->code,
+            'data'    => $cand
+        ], 201);
+
+    } catch (\Illuminate\Validation\ValidationException $e) {
+        \Log::error('❌ Erreur de validation:', [
+            'errors' => $e->errors(),
+            'message' => $e->getMessage()
+        ]);
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Erreur de validation',
+            'errors' => $e->errors()
+        ], 422);
+        
+    } catch (\Exception $e) {
+        \Log::error('❌ Erreur store():', [
+            'message' => $e->getMessage(),
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Erreur lors de la création de la candidature: ' . $e->getMessage()
+        ], 500);
     }
+}
 
     /** Flux invité */
     public function storeGuest(Request $request)
@@ -577,88 +676,86 @@ class CandidatureController extends Controller
     }
 
     public function index(Request $request)
-    {
-        try {
-            Log::info('=== index() - Toutes les candidatures (Admin) ===');
-            
-            $user = $request->user();
-            
-            // Vérifier que c'est un admin
-            if (!$user || ($user->role !== 'Administrateur' && $user->role !== 'admin')) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Accès réservé aux administrateurs'
-                ], 403);
-            }
-            
-            // Récupérer TOUTES les candidatures
-            // ✅ CORRECTION : charger 'candidat' (qui est un User), pas 'candidat.user'
-            $candidatures = Candidature::with([
-                'offre:id,titre,type_contrat,localisation',
-                'candidat:id,nom,prenom,email,telephone'  // ✅ Directement le User
-            ])
-            ->orderBy('created_at', 'desc')
-            ->get();
-            
-            Log::info("Candidatures trouvées: {$candidatures->count()}");
-            
-            // Formater les données
-            $formatted = $candidatures->map(function($candidature) {
-                return [
-                    'id' => $candidature->id,
-                    'code' => $candidature->code,
-                    'statut' => $candidature->statut,
-                    'created_at' => $candidature->created_at,
-                    
-                    // Infos de l'offre
-                    'offre_titre' => $candidature->offre?->titre ?? 'N/A',
-                    'offre_type_contrat' => $candidature->offre?->type_contrat ?? 'N/A',
-                    'offre_localisation' => $candidature->offre?->localisation ?? 'N/A',
-                    
-                    // ✅ Infos du candidat (directement depuis User)
-                    'candidat_nom' => $candidature->candidat ? 
-                        trim(($candidature->candidat->prenom ?? '') . ' ' . ($candidature->candidat->nom ?? '')) : 
-                        'N/A',
-                    'candidat_email' => $candidature->candidat?->email ?? 'N/A',
-                    'candidat_telephone' => $candidature->candidat?->telephone ?? 'N/A',
-                    
-                    // Fichiers
-                    'cv' => $candidature->cv,
-                    'lettre_motivation' => $candidature->lettre_motivation,
-                    'lettre_motivation_fichier' => $candidature->lettre_motivation_fichier,
-                    
-                    // URLs de téléchargement
-                    'cv_url' => $candidature->cv ? 
-                        url("api/candidatures/{$candidature->id}/download/cv") : null,
-                    'lm_url' => ($candidature->lettre_motivation_fichier || 
-                               (isset($candidature->lettre_motivation) && 
-                                \Str::startsWith($candidature->lettre_motivation, '[file]'))) ? 
-                        url("api/candidatures/{$candidature->id}/download/lm") : null,
-                ];
-            });
-            
-            return response()->json([
-                'success' => true,
-                'data' => $formatted
-            ]);
-            
-        } catch (\Exception $e) {
-            Log::error('Erreur index():', [
-                'message' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine()
-            ]);
-            
+{
+    try {
+        Log::info('=== index() - Toutes les candidatures (Admin) ===');
+        
+        $user = $request->user();
+        
+        // ✅ CORRECTION : Utiliser hasRole() au lieu de $user->role
+        if (!$user || !$user->hasAnyRole(['Administrateur', 'admin'])) {
             return response()->json([
                 'success' => false,
-                'message' => 'Erreur lors du chargement',
-                'error' => config('app.debug') ? $e->getMessage() : null
-            ], 500);
+                'message' => 'Accès réservé aux administrateurs'
+            ], 403);
         }
+        
+        // Récupérer TOUTES les candidatures
+        $candidatures = Candidature::with([
+            'offre:id,titre,type_contrat,localisation',
+            'candidat:id,nom,prenom,email,telephone'
+        ])
+        ->orderBy('created_at', 'desc')
+        ->get();
+        
+        Log::info("Candidatures trouvées: {$candidatures->count()}");
+        
+        // Formater les données
+        $formatted = $candidatures->map(function($candidature) {
+            return [
+                'id' => $candidature->id,
+                'code' => $candidature->code,
+                'statut' => $candidature->statut,
+                'created_at' => $candidature->created_at,
+                
+                'offre_titre' => $candidature->offre?->titre ?? 'N/A',
+                'offre_type_contrat' => $candidature->offre?->type_contrat ?? 'N/A',
+                'offre_localisation' => $candidature->offre?->localisation ?? 'N/A',
+                
+                'candidat_nom' => $candidature->candidat ? 
+                    trim(($candidature->candidat->prenom ?? '') . ' ' . ($candidature->candidat->nom ?? '')) : 
+                    'N/A',
+                'candidat_email' => $candidature->candidat?->email ?? 'N/A',
+                'candidat_telephone' => $candidature->candidat?->telephone ?? 'N/A',
+                
+                'cv' => $candidature->cv,
+                'lettre_motivation' => $candidature->lettre_motivation,
+                'lettre_motivation_fichier' => $candidature->lettre_motivation_fichier,
+                
+                'cv_url' => $candidature->cv ? 
+                    url("api/candidatures/{$candidature->id}/download/cv") : null,
+                'lm_url' => ($candidature->lettre_motivation_fichier || 
+                           (isset($candidature->lettre_motivation) && 
+                            \Str::startsWith($candidature->lettre_motivation, '[file]'))) ? 
+                    url("api/candidatures/{$candidature->id}/download/lm") : null,
+            ];
+        });
+        
+        return response()->json([
+            'success' => true,
+            'data' => $formatted
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('Erreur index():', [
+            'message' => $e->getMessage(),
+            'file' => $e->getFile(),
+            'line' => $e->getLine()
+        ]);
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Erreur lors du chargement',
+            'error' => config('app.debug') ? $e->getMessage() : null
+        ], 500);
     }
+}
 
     public function mesCandidatures(Request $request, $candidatParamId = null)
-    {
+{
+    try {
+        Log::info('=== mesCandidatures() - Candidatures du candidat ===');
+        
         // 1) Priorité au paramètre de route /mes-candidatures/{candidat}
         $candidatId = $candidatParamId;
 
@@ -669,22 +766,45 @@ class CandidatureController extends Controller
 
         // 3) Sinon déduire du user connecté (via Sanctum)
         if (!$candidatId && $request->user()) {
-            // ✅ CORRECTION : candidat_id = user_id (pas candidat->id)
             $candidatId = $request->user()->id;
         }
 
         if (!$candidatId) {
-            return response()->json(['success' => false, 'message' => 'candidat_id requis'], 422);
+            return response()->json([
+                'success' => false, 
+                'message' => 'candidat_id requis'
+            ], 422);
         }
+        
+        Log::info("Chargement candidatures pour candidat ID: $candidatId");
 
         // ✅ Charger les candidatures avec les relations
         $rows = Candidature::where('candidat_id', $candidatId)
             ->with(['offre.entreprise'])
             ->orderBy('created_at', 'desc')
             ->get();
+            
+        Log::info("Candidatures trouvées: " . $rows->count());
 
-        return response()->json(['success' => true, 'data' => $rows]);
+        return response()->json([
+            'success' => true, 
+            'data' => $rows
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('Erreur mesCandidatures():', [
+            'message' => $e->getMessage(),
+            'file' => $e->getFile(),
+            'line' => $e->getLine()
+        ]);
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Erreur lors du chargement',
+            'error' => config('app.debug') ? $e->getMessage() : null
+        ], 500);
     }
+}
 
     /**
  * ✅ Mettre à jour le statut d'une candidature (Recruteur ET CM)
@@ -896,7 +1016,7 @@ public function getByOffre($offreId)
             return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
         }
         
-        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+        if (!$user->hasAnyRole(['recruteur', 'community_manager', 'Recruteur', 'community_manager'])) {
             return response()->json([
                 'success' => false, 
                 'message' => 'Accès réservé aux recruteurs et community managers'

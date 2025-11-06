@@ -142,12 +142,13 @@ public function index(Request $request)
      */
     public function store(Request $request)
 {
-    // ✅ Récupérer l'entreprise_id selon le rôle
     $user = $request->user();
     
     if (!$user) {
         return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
     }
+    
+    \Log::info('📥 Données reçues:', $request->all());
     
     $validator = Validator::make($request->all(), [
         'titre'            => 'required|string|max:255',
@@ -159,10 +160,8 @@ public function index(Request $request)
         'date_expiration'  => 'required|date|after:today',
         'salaire'          => 'nullable|numeric|min:0',
         'categorie_id'     => 'required|exists:categories,id',
-        'sponsored_level'  => 'nullable|integer|min:0|max:3',
-        'featured_until'   => 'nullable|date|after:now',
-        'statut'           => 'nullable|string',
-        'entreprise_id'    => 'nullable|integer|exists:entreprises,id', // ✅ Optionnel
+        'recruteur_id'     => 'required|integer|exists:users,id',
+        'entreprise_id'    => 'required|integer|exists:entreprises,id', // ✅ OBLIGATOIRE maintenant
     ]);
 
     if ($validator->fails()) {
@@ -173,51 +172,38 @@ public function index(Request $request)
         ], 422);
     }
 
-    // ✅ Déterminer l'entreprise_id
-    $entrepriseId = null;
-    
-    if ($request->filled('entreprise_id')) {
-        $entrepriseId = (int)$request->input('entreprise_id');
-        
-        // Vérifier l'accès
-        if (!$user->canManageEntreprise($entrepriseId)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Vous n\'avez pas accès à cette entreprise'
-            ], 403);
-        }
-    } else {
-        // Prendre la première entreprise gérable
-        $entreprises = $user->getManageableEntreprises();
-        
-        if ($entreprises->isEmpty()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Aucune entreprise disponible'
-            ], 400);
-        }
-        
-        $entrepriseId = $entreprises->first()->id;
-    }
-
+    // ✅ Récupérer les données TELLES QUELLES
     $payload = $request->only([
-        'titre','description','experience','localisation','type_offre','type_contrat',
-        'date_expiration','salaire','categorie_id','statut',
-        'sponsored_level','featured_until'
+        'titre',
+        'description',
+        'experience',
+        'localisation',
+        'type_offre',
+        'type_contrat',
+        'date_expiration',
+        'salaire',
+        'categorie_id',
+        'recruteur_id',    // ✅ = 22 (le propriétaire de l'entreprise)
+        'entreprise_id',   // ✅ = 9 (SOBELEC)
+        'statut'
     ]);
 
-    // ✅ Ajouter entreprise_id et recruteur_id
-    $payload['entreprise_id'] = $entrepriseId;
-    $payload['recruteur_id'] = $user->id;
     $payload['statut'] = $payload['statut'] ?? 'brouillon';
-    $payload['sponsored_level'] = isset($payload['sponsored_level']) ? (int)$payload['sponsored_level'] : 0;
+    
+    \Log::info('💾 Payload avant création:', $payload);
 
+    // ✅ Créer l'offre
     $offre = Offre::create($payload);
+
+    \Log::info('✅ Offre créée:', $offre->toArray());
+
+    // ✅ Charger les relations
+    $offre->load(['entreprise', 'categorie', 'recruteur']);
 
     return response()->json([
         'success' => true,
         'message' => 'Offre créée avec succès',
-        'data'    => $offre->load(['entreprise', 'categorie'])
+        'data'    => $offre
     ], 201);
 }
 
@@ -779,4 +765,57 @@ public function publier($id)
             ], 403)
         ];
     }
+
+    /**
+ * ✅ Récupérer les offres des entreprises gérées par le CM
+ * Avec filtre optionnel par entreprise_id
+ */
+public function getOffresForCommunityManager(Request $request)
+{
+    $user = $request->user();
+    
+    if (!$user) {
+        return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
+    }
+    
+    // Récupérer l'entreprise_id depuis la requête (optionnel)
+    $entrepriseId = $request->query('entreprise_id');
+    
+    \Log::info('📋 CM récupère offres', [
+        'user_id' => $user->id,
+        'entreprise_id' => $entrepriseId
+    ]);
+    
+    // Récupérer les IDs des entreprises gérées par le CM
+    $entrepriseIds = $user->entreprisesGerees()->pluck('entreprises.id')->toArray();
+    
+    if (empty($entrepriseIds)) {
+        return response()->json([
+            'success' => true,
+            'data' => []
+        ]);
+    }
+    
+    // Query de base : offres des entreprises gérées par le CM
+    $query = Offre::with(['entreprise', 'categorie', 'recruteur', 'validateur'])
+        ->whereIn('entreprise_id', $entrepriseIds);
+    
+    // ✅ Si une entreprise spécifique est sélectionnée, filtrer dessus
+    if ($entrepriseId) {
+        $query->where('entreprise_id', $entrepriseId);
+        \Log::info('🔍 Filtrage par entreprise:', ['entreprise_id' => $entrepriseId]);
+    }
+    
+    $offres = $query->orderBy('created_at', 'desc')->get();
+    
+    \Log::info('✅ Offres récupérées:', [
+        'count' => $offres->count(),
+        'entreprise_id' => $entrepriseId
+    ]);
+    
+    return response()->json([
+        'success' => true,
+        'data' => $offres
+    ]);
+}
 }

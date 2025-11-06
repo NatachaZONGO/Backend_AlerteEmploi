@@ -133,91 +133,137 @@ class AdminUserController extends Controller
      * PUT /users/{id} ou POST /users/{id} avec _method=PUT
      */
     public function update(Request $request, $id)
-    {
-        $user = User::find($id);
-        if (!$user) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Utilisateur non trouvé'
-            ], 404);
-        }
-
-        // Si un fichier est présent, on exige certaines règles "required",
-        // sinon on rend tout "sometimes".
-        if ($request->hasFile('photo')) {
-            $rules = [
-                'nom'       => 'required|string|max:255',
-                'prenom'    => 'required|string|max:255',
-                'telephone' => ['nullable', 'string', 'max:20', Rule::unique('users','telephone')->ignore($user->id)],
-                'email'     => ['required','email','max:255', Rule::unique('users','email')->ignore($user->id)],
-                'statut'    => ['required', Rule::in(['actif', 'inactif'])],
-                'password'  => 'nullable|string|min:8',
-                'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120',
-                'role_id'   => 'required|integer|exists:roles,id',
-            ];
-        } else {
-            $rules = [
-                'nom'       => 'sometimes|string|max:255',
-                'prenom'    => 'sometimes|string|max:255',
-                'telephone' => ['sometimes','nullable','string','max:20', Rule::unique('users','telephone')->ignore($user->id)],
-                'email'     => ['sometimes','email','max:255', Rule::unique('users','email')->ignore($user->id)],
-                'statut'    => ['sometimes', Rule::in(['actif', 'inactif'])],
-                'password'  => 'sometimes|nullable|string|min:8',
-                'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120',
-                'role_id'   => 'sometimes|integer|exists:roles,id',
-            ];
-        }
-
-        $messages = [
-            'photo.max'   => 'La photo ne doit pas dépasser 5120 kilo-octets (~5 Mo).',
-            'photo.image' => 'Le fichier doit être une image.',
-            'photo.mimes' => 'Formats autorisés : jpg, jpeg, png, gif, webp.',
-        ];
-
-        $validator = Validator::make($request->all(), $rules, $messages);
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreurs de validation',
-                'errors'  => $validator->errors()
-            ], 422);
-        }
-        $data = $validator->validated();
-
-        // Mot de passe (seulement si fourni)
-        if (array_key_exists('password', $data) && !empty($data['password'])) {
-            $data['password'] = Hash::make($data['password']);
-        } else {
-            unset($data['password']);
-        }
-
-        // Photo
-        if ($request->hasFile('photo')) {
-            // Supprimer l’ancienne si elle existe
-            if ($user->photo && Storage::disk('public')->exists($user->photo)) {
-                Storage::disk('public')->delete($user->photo);
-            }
-            $data['photo'] = $request->file('photo')->store('photos', 'public');
-        } else {
-            // si on n’envoie pas de fichier, ne pas toucher à la photo
-            unset($data['photo']);
-        }
-
-        // Mettre à jour le rôle si fourni
-        if (array_key_exists('role_id', $data)) {
-            $user->roles()->sync([$data['role_id']]);
-            unset($data['role_id']); // pas un champ de la table users
-        }
-
-        // Mise à jour des autres champs
-        $user->update($data);
-
+{
+    \Log::info('========================================');
+    \Log::info('🔍 DÉBUT UPDATE USER');
+    \Log::info('User ID: ' . $id);
+    \Log::info('Content-Type: ' . $request->header('Content-Type'));
+    \Log::info('All Request Data:', $request->all());
+    \Log::info('Has role_ids?', ['exists' => $request->has('role_ids')]);
+    \Log::info('role_ids value:', ['value' => $request->input('role_ids')]);
+    \Log::info('========================================');
+    
+    $user = User::find($id);
+    if (!$user) {
         return response()->json([
-            'success' => true,
-            'message' => 'Utilisateur mis à jour avec succès',
-            'data'    => $user->fresh()->load('roles')
-        ]);
+            'success' => false,
+            'message' => 'Utilisateur non trouvé'
+        ], 404);
     }
+    $user = User::find($id);
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Utilisateur non trouvé'
+        ], 404);
+    }
+
+    \Log::info('🔄 Mise à jour utilisateur', [
+        'user_id' => $id,
+        'request_data' => $request->all()
+    ]);
+
+    // ✅ Validation adaptée pour rôles multiples
+    if ($request->hasFile('photo')) {
+        $rules = [
+            'nom'       => 'required|string|max:255',
+            'prenom'    => 'required|string|max:255',
+            'telephone' => ['nullable', 'string', 'max:20', Rule::unique('users','telephone')->ignore($user->id)],
+            'email'     => ['required','email','max:255', Rule::unique('users','email')->ignore($user->id)],
+            'statut'    => ['required', Rule::in(['actif', 'inactif'])],
+            'password'  => 'nullable|string|min:8',
+            'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120',
+            'role_ids'  => 'required|array', // ✅ CHANGÉ : array au lieu de integer
+            'role_ids.*' => 'integer|exists:roles,id', // ✅ AJOUTÉ : validation de chaque ID
+        ];
+    } else {
+        $rules = [
+            'nom'       => 'sometimes|string|max:255',
+            'prenom'    => 'sometimes|string|max:255',
+            'telephone' => ['sometimes','nullable','string','max:20', Rule::unique('users','telephone')->ignore($user->id)],
+            'email'     => ['sometimes','email','max:255', Rule::unique('users','email')->ignore($user->id)],
+            'statut'    => ['sometimes', Rule::in(['actif', 'inactif'])],
+            'password'  => 'sometimes|nullable|string|min:8',
+            'photo'     => 'sometimes|nullable|file|image|mimes:jpg,jpeg,png,gif,webp|max:5120',
+            'role_ids'  => 'sometimes|array', // ✅ CHANGÉ : array
+            'role_ids.*' => 'integer|exists:roles,id', // ✅ AJOUTÉ
+        ];
+    }
+
+    $messages = [
+        'photo.max'   => 'La photo ne doit pas dépasser 5120 kilo-octets (~5 Mo).',
+        'photo.image' => 'Le fichier doit être une image.',
+        'photo.mimes' => 'Formats autorisés : jpg, jpeg, png, gif, webp.',
+        'role_ids.required' => 'Au moins un rôle doit être sélectionné.', // ✅ AJOUTÉ
+        'role_ids.*.exists' => 'Un ou plusieurs rôles sélectionnés n\'existent pas.', // ✅ AJOUTÉ
+    ];
+
+    $validator = Validator::make($request->all(), $rules, $messages);
+    if ($validator->fails()) {
+        \Log::error('❌ Validation échouée', ['errors' => $validator->errors()]);
+        return response()->json([
+            'success' => false,
+            'message' => 'Erreurs de validation',
+            'errors'  => $validator->errors()
+        ], 422);
+    }
+    $data = $validator->validated();
+
+    \Log::info('✅ Données validées', $data);
+
+    // Mot de passe (seulement si fourni)
+    if (array_key_exists('password', $data) && !empty($data['password'])) {
+        $data['password'] = Hash::make($data['password']);
+    } else {
+        unset($data['password']);
+    }
+
+    // Photo
+    if ($request->hasFile('photo')) {
+        // Supprimer l'ancienne si elle existe
+        if ($user->photo && Storage::disk('public')->exists($user->photo)) {
+            Storage::disk('public')->delete($user->photo);
+        }
+        $data['photo'] = $request->file('photo')->store('photos', 'public');
+    } else {
+        // si on n'envoie pas de fichier, ne pas toucher à la photo
+        unset($data['photo']);
+    }
+
+    // ✅ Mettre à jour les rôles si fournis (PLUSIEURS rôles)
+    if (array_key_exists('role_ids', $data)) {
+        \Log::info('🔄 Avant sync - Rôles actuels', [
+            'roles' => $user->roles->pluck('id', 'nom')->toArray()
+        ]);
+        
+        // sync() remplace tous les anciens rôles par les nouveaux
+        $user->roles()->sync($data['role_ids']);
+        
+        \Log::info('✅ Après sync - Nouveaux rôles', [
+            'role_ids' => $data['role_ids'],
+            'roles_attached' => $user->roles()->pluck('id', 'nom')->toArray()
+        ]);
+        
+        unset($data['role_ids']); // pas un champ de la table users
+    }
+
+    // Mise à jour des autres champs
+    $user->update($data);
+
+    // ✅ Recharger l'utilisateur avec ses nouveaux rôles
+    $user = $user->fresh()->load('roles');
+
+    \Log::info('✅ Utilisateur mis à jour', [
+        'user_id' => $user->id,
+        'roles' => $user->roles->pluck('nom')->toArray()
+    ]);
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Utilisateur mis à jour avec succès',
+        'data'    => $user
+    ]);
+}
 
     /**
      * Supprimer un utilisateur

@@ -51,94 +51,83 @@ class OffreController extends Controller
     /**
      * ✅ Créer une nouvelle offre (Recruteurs ET Community Managers)
      */
-    public function store(Request $request)
-    {
-        $user = Auth::user();
-
-        // ✅ Vérifier que l'utilisateur est recruteur OU community manager
-        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Seuls les recruteurs et community managers peuvent créer des offres'
-            ], 403);
-        }
-
-        // ✅ Récupérer l'entreprise
-        $entrepriseId = $request->input('entreprise_id');
-
-        // Si pas spécifiée, prendre la première gérable
-        if (!$entrepriseId) {
-            $entreprises = $user->getManageableEntreprises();
-            $entreprise = $entreprises->first();
-            
-            if (!$entreprise) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Aucune entreprise disponible pour publier des offres'
-                ], 403);
-            }
-            
-            $entrepriseId = $entreprise->id;
-        }
-
-        // ✅ Vérifier les droits sur l'entreprise
-        if (!$user->canManageEntreprise($entrepriseId)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Vous n\'avez pas accès à cette entreprise'
-            ], 403);
-        }
-
-        // ✅ Vérifier que l'entreprise est validée
-        $entreprise = \App\Models\Entreprise::find($entrepriseId);
-        if (!$entreprise || $entreprise->statut !== 'valide') {
-            return response()->json([
-                'success' => false,
-                'message' => 'L\'entreprise doit être validée pour publier des offres'
-            ], 403);
-        }
-
-        $validator = Validator::make($request->all(), [
-            'titre' => 'required|string|max:255',
-            'description' => 'required|string',
-            'experience' => 'required|string|max:255',
-            'localisation' => 'required|string|max:255',
-            'type_offre' => 'required|in:emploi,stage',
-            'type_contrat' => 'required|string|max:255',
-            'date_expiration' => 'required|date|after:today',
-            'salaire' => 'nullable|numeric|min:0',
-            'categorie_id' => 'required|exists:categories,id',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erreurs de validation',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $offre = Offre::create([
-            'titre' => $request->titre,
-            'description' => $request->description,
-            'experience' => $request->experience,
-            'localisation' => $request->localisation,
-            'type_offre' => $request->type_offre,
-            'type_contrat' => $request->type_contrat,
-            'date_expiration' => $request->date_expiration,
-            'salaire' => $request->salaire,
-            'categorie_id' => $request->categorie_id,
-            'entreprise_id' => $entrepriseId, // ✅ IMPORTANT
-            'recruteur_id' => $user->id, // L'utilisateur qui a créé (peut être CM)
-            'statut' => 'brouillon',
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Offre créée avec succès',
-            'data' => $offre->load(['recruteur', 'entreprise', 'categorie'])
-        ], 201);
+    /**
+ * Créer une nouvelle offre
+ */
+/**
+ * Créer une nouvelle offre
+ */
+public function store(Request $request)
+{
+    $user = $request->user();
+    
+    if (!$user) {
+        return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
     }
+    
+    // ✅ Log pour déboguer
+    \Log::info('📥 Création offre - Données reçues:', $request->all());
+    
+    $validator = Validator::make($request->all(), [
+        'titre'            => 'required|string|max:255',
+        'description'      => 'required|string',
+        'experience'       => 'required|string|max:255',
+        'localisation'     => 'required|string|max:255',
+        'type_offre'       => 'required|in:emploi,stage',
+        'type_contrat'     => 'required|string|max:255',
+        'date_expiration'  => 'required|date|after:today',
+        'salaire'          => 'nullable|numeric|min:0',
+        'categorie_id'     => 'required|exists:categories,id',
+        'recruteur_id'     => 'required|integer|exists:users,id',
+        'entreprise_id'    => 'nullable|integer|exists:entreprises,id',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json([
+            'success' => false, 
+            'message' => 'Erreurs de validation', 
+            'errors' => $validator->errors()
+        ], 422);
+    }
+
+    // ✅ IMPORTANT : Récupérer les données SANS les modifier
+    $payload = $request->only([
+        'titre',
+        'description',
+        'experience',
+        'localisation',
+        'type_offre',
+        'type_contrat',
+        'date_expiration',
+        'salaire',
+        'categorie_id',
+        'recruteur_id',      // ✅ Garder tel quel (22)
+        'entreprise_id',     // ✅ Garder tel quel (9)
+        'statut'
+    ]);
+
+    $payload['statut'] = $payload['statut'] ?? 'brouillon';
+    
+    // ✅ Log avant création
+    \Log::info('💾 Payload avant création:', $payload);
+
+    // ❌ NE PAS FAIRE : $payload['recruteur_id'] = $user->id;
+    // ❌ NE PAS FAIRE : unset($payload['entreprise_id']);
+
+    $offre = Offre::create($payload);
+
+    // ✅ Log après création
+    \Log::info('✅ Offre créée:', $offre->toArray());
+
+    // ✅ Charger les relations
+    $offre->load(['entreprise', 'categorie', 'recruteur']);
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Offre créée avec succès',
+        'data'    => $offre
+    ], 201);
+}
 
     /**
      * Afficher une offre spécifique

@@ -85,5 +85,5 @@ class Pays extends Model
         return $this->hasMany(Entreprise::class);
     }
 
-    
+     
 }

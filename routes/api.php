@@ -127,8 +127,17 @@ Route::middleware('auth:sanctum')->prefix('community')->group(function () {
     // Dashboard du CM
     Route::get('/dashboard', [CommunityManagerController::class, 'dashboard']);
     
-    // Statistiques globales du CM (toutes ses entreprises)
-    Route::get('/stats', [CommunityManagerController::class, 'getStatistiques']);
+    // ✅ Statistiques du CM (supporte ?entreprise_id pour filtrer)
+    Route::get('/statistiques', [CommunityManagerController::class, 'getStatistiques']);
+    
+    // ✅ AJOUTÉ : Offres des entreprises gérées (supporte ?entreprise_id)
+    Route::get('/offres', [CommunityManagerController::class, 'getOffres']);
+    
+    // ✅ AJOUTÉ : Candidatures des offres des entreprises gérées (supporte ?entreprise_id)
+    Route::get('/candidatures', [CommunityManagerController::class, 'getCandidatures']);
+    
+    // ✅ AJOUTÉ : Publicités des entreprises gérées (supporte ?entreprise_id)
+    Route::get('/publicites', [CommunityManagerController::class, 'getPublicites']);
 });
 
 // ============================================================================
@@ -177,7 +186,7 @@ Route::prefix('offres')->controller(OffreController::class)->group(function () {
     // ✅ Protégé (Recruteur ET Community Manager)
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('/dashboard',     'dashboard');
-        Route::get('/mes-offres',    'mesOffres');
+        Route::get('/mes-offres',    'mesOffres'); // ✅ Recruteur uniquement
 
         Route::post('/',             'store');
         Route::put ('/{id}',         'update')->whereNumber('id');
@@ -217,7 +226,7 @@ Route::prefix('candidatures')->group(function () {
         Route::get('/mes-candidatures/{candidat}', [CandidatureController::class, 'mesCandidatures'])
             ->whereNumber('candidat');
 
-        // ✅ Recruteur / Community Manager (candidatures reçues)
+        // ✅ Recruteur (candidatures reçues pour ses offres)
         Route::get('/recues',                         [CandidatureController::class, 'candidaturesRecues']);
         Route::put('/{candidature}/statut',           [CandidatureController::class, 'updateStatut'])->whereNumber('candidature');
         Route::get('/offres/{offreId}/candidatures',  [CandidatureController::class, 'getByOffre'])->whereNumber('offreId');
@@ -245,6 +254,7 @@ Route::prefix('publicites')->group(function () {
 
     // ✅ Protégé (Recruteur ET Community Manager)
     Route::middleware('auth:sanctum')->group(function () {
+        // ✅ Recruteur : mes publicités (ses propres pubs)
         Route::get('/mes-publicites', [PubliciteController::class, 'getMesPublicites']);
         
         // CRUD
@@ -296,6 +306,7 @@ Route::prefix('categories')->group(function () {
     Route::put   ('/{id}', [AdminCategorieController::class, 'update'])->whereNumber('id');
     Route::delete('/{id}', [AdminCategorieController::class, 'destroy'])->whereNumber('id');
 });
+
 // ============================================================================
 // DASHBOARD GLOBALES (protégé)
 // ============================================================================

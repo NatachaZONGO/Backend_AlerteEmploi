@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Notifications\DatabaseNotification;
 
+
 class User extends Authenticatable implements MustVerifyEmail
 {
     use HasApiTokens, HasFactory, Notifiable;
@@ -68,6 +69,11 @@ class User extends Authenticatable implements MustVerifyEmail
         return $role?->nom;
     }
 
+    public function hasAnyRole(array $roleNames): bool
+    {
+        return $this->roles()->whereIn('nom', $roleNames)->exists();
+    }
+
     /** Accessor: id du rôle principal (1er rôle lié) */
     public function getRoleIdAttribute(): ?int
     {
@@ -88,9 +94,9 @@ class User extends Authenticatable implements MustVerifyEmail
     /**
      * Entreprise du recruteur (propriétaire)
      */
-    public function entreprise(): HasOne
+    public function entreprise()
     {
-        return $this->hasOne(Entreprise::class);
+        return $this->hasOne(Entreprise::class, 'user_id');
     }
 
     /**

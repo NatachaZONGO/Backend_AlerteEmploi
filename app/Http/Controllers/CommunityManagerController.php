@@ -4,19 +4,226 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Models\Entreprise;
+use App\Models\Offre;
+use App\Models\Candidature;
+use App\Models\Publicite;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
 class CommunityManagerController extends Controller
 {
     /**
-     * ✅ Liste des entreprises gérables par le Community Manager (CORRIGÉE)
+     * ✅ Récupérer les offres des entreprises gérées par le CM
+     * Avec filtre optionnel par entreprise_id
+     */
+    public function getOffres(Request $request)
+    {
+        $user = $request->user();
+        
+        if (!$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Accès réservé aux Community Managers'
+            ], 403);
+        }
+        
+        $entrepriseId = $request->query('entreprise_id');
+        
+        \Log::info('📋 CM récupère offres', [
+            'user_id' => $user->id,
+            'entreprise_id' => $entrepriseId
+        ]);
+        
+        $entrepriseIds = $user->entreprisesGerees()->pluck('entreprises.id')->toArray();
+        
+        if (empty($entrepriseIds)) {
+            \Log::info('⚠️ CM n\'a aucune entreprise assignée');
+            return response()->json([
+                'success' => true,
+                'data' => []
+            ]);
+        }
+        
+        $query = Offre::with(['entreprise', 'categorie', 'recruteur', 'validateur'])
+            ->whereIn('entreprise_id', $entrepriseIds);
+        
+        if ($entrepriseId && in_array($entrepriseId, $entrepriseIds)) {
+            $query->where('entreprise_id', $entrepriseId);
+            \Log::info('🔍 Filtrage par entreprise:', ['entreprise_id' => $entrepriseId]);
+        } elseif ($entrepriseId && !in_array($entrepriseId, $entrepriseIds)) {
+            \Log::warning('⚠️ Tentative d\'accès non autorisé', [
+                'user_id' => $user->id,
+                'entreprise_id' => $entrepriseId,
+                'allowed_ids' => $entrepriseIds
+            ]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
+        }
+        
+        $offres = $query->orderBy('created_at', 'desc')->get();
+        
+        \Log::info('✅ Offres récupérées', [
+            'count' => $offres->count(),
+            'entreprise_id' => $entrepriseId,
+            'entreprises_gerees' => count($entrepriseIds)
+        ]);
+        
+        return response()->json([
+            'success' => true,
+            'data' => $offres,
+            'meta' => [
+                'total_offres' => $offres->count(),
+                'entreprise_filtree' => $entrepriseId ? (int)$entrepriseId : null,
+                'entreprises_gerees_count' => count($entrepriseIds)
+            ]
+        ]);
+    }
+
+    /**
+     * ✅ AJOUTÉ : Récupérer les candidatures des offres des entreprises gérées
+     * Avec filtre optionnel par entreprise_id
+     */
+    public function getCandidatures(Request $request)
+    {
+        $user = $request->user();
+        
+        if (!$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Accès réservé aux Community Managers'
+            ], 403);
+        }
+        
+        $entrepriseId = $request->query('entreprise_id');
+        
+        \Log::info('📋 CM récupère candidatures', [
+            'user_id' => $user->id,
+            'entreprise_id' => $entrepriseId
+        ]);
+        
+        $entrepriseIds = $user->entreprisesGerees()->pluck('entreprises.id')->toArray();
+        
+        if (empty($entrepriseIds)) {
+            \Log::info('⚠️ CM n\'a aucune entreprise assignée');
+            return response()->json([
+                'success' => true,
+                'data' => []
+            ]);
+        }
+        
+        // Query : candidatures des offres des entreprises gérées
+        $query = Candidature::with(['offre.entreprise', 'candidat', 'offre.categorie'])
+            ->whereHas('offre', function($q) use ($entrepriseIds) {
+                $q->whereIn('entreprise_id', $entrepriseIds);
+            });
+        
+        // ✅ Filtrer par entreprise si spécifié
+        if ($entrepriseId && in_array($entrepriseId, $entrepriseIds)) {
+            $query->whereHas('offre', function($q) use ($entrepriseId) {
+                $q->where('entreprise_id', $entrepriseId);
+            });
+            \Log::info('🔍 Filtrage candidatures par entreprise:', ['entreprise_id' => $entrepriseId]);
+        } elseif ($entrepriseId && !in_array($entrepriseId, $entrepriseIds)) {
+            \Log::warning('⚠️ Tentative d\'accès non autorisé aux candidatures');
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
+        }
+        
+        $candidatures = $query->orderBy('created_at', 'desc')->get();
+        
+        \Log::info('✅ Candidatures récupérées', [
+            'count' => $candidatures->count(),
+            'entreprise_id' => $entrepriseId
+        ]);
+        
+        return response()->json([
+            'success' => true,
+            'data' => $candidatures,
+            'meta' => [
+                'total_candidatures' => $candidatures->count(),
+                'entreprise_filtree' => $entrepriseId ? (int)$entrepriseId : null,
+                'entreprises_gerees_count' => count($entrepriseIds)
+            ]
+        ]);
+    }
+
+    /**
+     * ✅ AJOUTÉ : Récupérer les publicités des entreprises gérées
+     * Avec filtre optionnel par entreprise_id
+     */
+    public function getPublicites(Request $request)
+    {
+        $user = $request->user();
+        
+        if (!$user->hasRole('community_manager')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Accès réservé aux Community Managers'
+            ], 403);
+        }
+        
+        $entrepriseId = $request->query('entreprise_id');
+        
+        \Log::info('📋 CM récupère publicités', [
+            'user_id' => $user->id,
+            'entreprise_id' => $entrepriseId
+        ]);
+        
+        $entrepriseIds = $user->entreprisesGerees()->pluck('entreprises.id')->toArray();
+        
+        if (empty($entrepriseIds)) {
+            \Log::info('⚠️ CM n\'a aucune entreprise assignée');
+            return response()->json([
+                'success' => true,
+                'data' => []
+            ]);
+        }
+        
+        // Query : publicités des entreprises gérées
+        $query = Publicite::with(['entreprise', 'createur'])
+            ->whereIn('entreprise_id', $entrepriseIds);
+        
+        // ✅ Filtrer par entreprise si spécifié
+        if ($entrepriseId && in_array($entrepriseId, $entrepriseIds)) {
+            $query->where('entreprise_id', $entrepriseId);
+            \Log::info('🔍 Filtrage publicités par entreprise:', ['entreprise_id' => $entrepriseId]);
+        } elseif ($entrepriseId && !in_array($entrepriseId, $entrepriseIds)) {
+            \Log::warning('⚠️ Tentative d\'accès non autorisé aux publicités');
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
+        }
+        
+        $publicites = $query->orderBy('created_at', 'desc')->get();
+        
+        \Log::info('✅ Publicités récupérées', [
+            'count' => $publicites->count(),
+            'entreprise_id' => $entrepriseId
+        ]);
+        
+        return response()->json([
+            'success' => true,
+            'data' => $publicites,
+            'meta' => [
+                'total_publicites' => $publicites->count(),
+                'entreprise_filtree' => $entrepriseId ? (int)$entrepriseId : null,
+                'entreprises_gerees_count' => count($entrepriseIds)
+            ]
+        ]);
+    }
+
+    /**
+     * ✅ Liste des entreprises gérables par le Community Manager
      */
     public function getEntreprises(Request $request)
     {
         $user = $request->user();
         
-        // ✅ Charger les entreprises AVEC les relations user et pays
         $entreprises = $user->entreprisesGerees()
             ->with(['user', 'pays'])
             ->get();
@@ -60,7 +267,7 @@ class CommunityManagerController extends Controller
     }
 
     /**
-     * Statistiques du CM
+     * ✅ MODIFIÉ : Statistiques du CM (avec filtre optionnel)
      */
     public function getStatistiques(Request $request)
     {
@@ -73,16 +280,23 @@ class CommunityManagerController extends Controller
             ], 403);
         }
 
+        $entrepriseId = $request->query('entreprise_id');
         $entreprises = $user->entreprisesGerees;
-        $entrepriseIds = $entreprises->pluck('id');
+        $entrepriseIds = $entreprises->pluck('id')->toArray();
+
+        // ✅ Si une entreprise est sélectionnée, filtrer les stats
+        if ($entrepriseId && in_array($entrepriseId, $entrepriseIds)) {
+            $entrepriseIds = [$entrepriseId];
+        }
 
         $stats = [
-            'entreprises_count' => $entreprises->count(),
-            'offres_count' => \App\Models\Offre::whereIn('entreprise_id', $entrepriseIds)->count(),
-            'candidatures_count' => \App\Models\Candidature::whereHas('offre', function($q) use ($entrepriseIds) {
+            'entreprises_count' => count($entrepriseIds),
+            'offres_count' => Offre::whereIn('entreprise_id', $entrepriseIds)->count(),
+            'candidatures_count' => Candidature::whereHas('offre', function($q) use ($entrepriseIds) {
                 $q->whereIn('entreprise_id', $entrepriseIds);
             })->count(),
-            'publicites_count' => \App\Models\Publicite::whereIn('entreprise_id', $entrepriseIds)->count(),
+            'publicites_count' => Publicite::whereIn('entreprise_id', $entrepriseIds)->count(),
+            'entreprise_filtree' => $entrepriseId ? (int)$entrepriseId : null
         ];
 
         return response()->json([
@@ -196,7 +410,6 @@ class CommunityManagerController extends Controller
             ], 400);
         }
 
-        // ✅ Charger avec relations
         $entreprises = $user->entreprisesGerees()
             ->with(['user', 'pays'])
             ->get();

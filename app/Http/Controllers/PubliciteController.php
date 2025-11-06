@@ -82,133 +82,164 @@ class PubliciteController extends Controller
     /**
      * ✅ POST /publicites (Recruteur ET Community Manager)
      */
-    public function store(Request $request)
-    {
-        $user = Auth::user();
-        
-        if (!$user) {
-            return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
-        }
-        
-        // ✅ Vérifier que c'est un recruteur OU community manager
-        if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Seuls les recruteurs et community managers peuvent créer des publicités'
-            ], 403);
-        }
-        
-        $base = $request->validate([
-            'titre'         => 'required|string|max:255',
-            'description'   => 'nullable|string|max:10000',
-            'lien_externe'  => 'nullable|url',
-            'type'          => 'sometimes|in:banniere,sidebar,footer',
-            'duree'         => 'required|in:3,7,14,30,60,90',
-            'date_debut'    => 'required|date|after_or_equal:'.now()->toDateString(),
-            'media_request' => 'required|in:image,video,both',
-            'dual_unlock_code' => 'nullable|string|min:6',
-            'entreprise_id'      => 'sometimes|integer|exists:entreprises,id',
-            'entreprise_pk'      => 'sometimes|integer|exists:entreprises,id',
-            'entreprise_user_id' => 'sometimes|integer|exists:entreprises,user_id',
-            'user_id'            => 'sometimes|integer|exists:users,id',
-        ]);
-
-        $entrepriseId = $this->resolveEntrepriseId($request);
-        
-        // ✅ Si pas d'entreprise spécifiée, prendre la première gérable
-        if (!$entrepriseId) {
-            $entreprises = $user->getManageableEntreprises();
-            $entreprise = $entreprises->first();
-            
-            if (!$entreprise) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Aucune entreprise disponible pour créer des publicités'
-                ], 422);
-            }
-            
-            $entrepriseId = $entreprise->id;
-        }
-        
-        // ✅ Vérifier les droits sur l'entreprise
-        if (!$user->canManageEntreprise($entrepriseId)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Vous n\'avez pas accès à cette entreprise'
-            ], 403);
-        }
-
-        // Initialiser
-        $image = null;
-        $video = null;
-
-        // IMAGE
-        if ($request->hasFile('image')) {
-            $request->validate(['image' => 'image|mimes:jpg,jpeg,png,webp,gif|max:5120']);
-            $image = $request->file('image')->store('publicites/images','public');
-        } elseif ($request->filled('image')) {
-            $request->validate(['image' => 'string|max:1000']);
-            $image = $request->input('image');
-        }
-
-        // VIDEO
-        if ($request->hasFile('video')) {
-            $request->validate(['video' => 'file|mimes:mp4,webm,ogg,ogv,mov,avi|max:51200']);
-            $video = $request->file('video')->store('publicites/videos','public');
-        } elseif ($request->filled('video')) {
-            $request->validate(['video' => 'string|max:2000']);
-            $video = $request->input('video');
-        }
-
-        // Contraintes selon media_request
-        if ($base['media_request'] === 'image' && !$image) {
-            return response()->json(['success'=>false,'message'=>'Image requise'], 422);
-        }
-        if ($base['media_request'] === 'video' && !$video) {
-            return response()->json(['success'=>false,'message'=>'Vidéo requise'], 422);
-        }
-        if ($base['media_request'] === 'both' && (!$image || !$video)) {
-            return response()->json(['success'=>false,'message'=>'Image et vidéo requises pour le mode both'], 422);
-        }
-
-        $calc = Publicite::calculerPrixEtDateFin($base['duree'], $base['date_debut']);
-
-        $mediaEffective = $base['media_request'];
-        $dualUnlockCode = null;
-        $dualUnlockedAt = null;
-
-        if ($base['media_request'] === 'both') {
-            if ($request->filled('dual_unlock_code') && $this->isValidUnlockCode($request->input('dual_unlock_code'))) {
-                $dualUnlockCode = $request->input('dual_unlock_code');
-                $dualUnlockedAt = now();
-                $mediaEffective = 'both';
-            } else {
-                $mediaEffective = $image ? 'image' : 'video';
-            }
-        }
-
-        $pub = Publicite::create([
-            'titre'            => $request->input('titre'),
-            'description'      => $request->input('description'),
-            'image'            => $image,
-            'video'            => $video,
-            'lien_externe'     => $request->input('lien_externe'),
-            'type'             => $request->input('type','banniere'),
-            'media_request'    => $base['media_request'],
-            'media_effective'  => $mediaEffective,
-            'dual_unlock_code' => $dualUnlockCode,
-            'dual_unlocked_at' => $dualUnlockedAt,
-            'payment_status'   => 'unpaid',
-            'duree'            => $base['duree'],
-            'prix'             => $calc['prix'],
-            'date_debut'       => $base['date_debut'],
-            'date_fin'         => $calc['date_fin'],
-            'entreprise_id'    => $entrepriseId,
-            'statut'           => 'brouillon',
-        ]);
-
-        return response()->json(['success'=>true,'message'=>'Publicité créée','data'=>$pub], 201);
+    /**
+ * ✅ POST /publicites (Recruteur ET Community Manager)
+ */
+public function store(Request $request)
+{
+    $user = Auth::user();
+    
+    if (!$user) {
+        return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
     }
+    
+    \Log::info('=== CREATION PUBLICITE ===');
+    \Log::info('User:', ['id' => $user->id, 'roles' => $user->roles->pluck('nom')]);
+    \Log::info('Données reçues:', $request->all());
+    
+    // ✅ Vérifier que c'est un recruteur OU community manager
+    if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Seuls les recruteurs et community managers peuvent créer des publicités'
+        ], 403);
+    }
+    
+    // ✅ MODIFIÉ : duree et date_debut sont maintenant OPTIONNELS à la création
+    $base = $request->validate([
+        'titre'         => 'required|string|max:255',
+        'description'   => 'nullable|string|max:10000',
+        'lien_externe'  => 'nullable|url',
+        'type'          => 'sometimes|in:banniere,sidebar,footer',
+        'duree'         => 'nullable|in:3,7,14,30,60,90', // ✅ OPTIONNEL
+        'date_debut'    => 'nullable|date', // ✅ OPTIONNEL (plus de after_or_equal)
+        'media_request' => 'required|in:image,video,both',
+        'dual_unlock_code' => 'nullable|string|min:6',
+        'entreprise_id'      => 'nullable|integer|exists:entreprises,id',
+        'entreprise_pk'      => 'nullable|integer|exists:entreprises,id',
+        'entreprise_user_id' => 'nullable|integer|exists:entreprises,user_id',
+        'user_id'            => 'nullable|integer|exists:users,id',
+    ]);
+
+    // ✅ Résolution de l'entreprise
+    $entrepriseId = null;
+    $entrepriseId = $this->resolveEntrepriseId($request);
+    \Log::info('Entreprise résolue depuis params:', ['entreprise_id' => $entrepriseId]);
+    
+    if (!$entrepriseId) {
+        $entreprises = $user->getManageableEntreprises();
+        \Log::info('Entreprises gérables:', ['count' => $entreprises->count(), 'ids' => $entreprises->pluck('id')]);
+        
+        if ($entreprises->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Aucune entreprise disponible pour créer des publicités. Veuillez contacter l\'administrateur.'
+            ], 422);
+        }
+        
+        $entrepriseId = $entreprises->first()->id;
+        \Log::info('Sélection première entreprise:', ['entreprise_id' => $entrepriseId]);
+    }
+    
+    \Log::info('Entreprise finale:', ['entreprise_id' => $entrepriseId]);
+    
+    // ✅ Vérifier les droits sur l'entreprise
+    if (!$user->canManageEntreprise($entrepriseId)) {
+        \Log::warning('Accès refusé à l\'entreprise:', ['entreprise_id' => $entrepriseId, 'user_id' => $user->id]);
+        return response()->json([
+            'success' => false,
+            'message' => 'Vous n\'avez pas accès à cette entreprise'
+        ], 403);
+    }
+
+    // Initialiser
+    $image = null;
+    $video = null;
+
+    // IMAGE
+    if ($request->hasFile('image')) {
+        $request->validate(['image' => 'image|mimes:jpg,jpeg,png,webp,gif|max:5120']);
+        $image = $request->file('image')->store('publicites/images','public');
+        \Log::info('Image uploadée:', ['path' => $image]);
+    } elseif ($request->filled('image')) {
+        $request->validate(['image' => 'string|max:1000']);
+        $image = $request->input('image');
+    }
+
+    // VIDEO
+    if ($request->hasFile('video')) {
+        $request->validate(['video' => 'file|mimes:mp4,webm,ogg,ogv,mov,avi|max:51200']);
+        $video = $request->file('video')->store('publicites/videos','public');
+        \Log::info('Vidéo uploadée:', ['path' => $video]);
+    } elseif ($request->filled('video')) {
+        $request->validate(['video' => 'string|max:2000']);
+        $video = $request->input('video');
+    }
+
+    // Contraintes selon media_request
+    if ($base['media_request'] === 'image' && !$image) {
+        return response()->json(['success'=>false,'message'=>'Image requise'], 422);
+    }
+    if ($base['media_request'] === 'video' && !$video) {
+        return response()->json(['success'=>false,'message'=>'Vidéo requise'], 422);
+    }
+    if ($base['media_request'] === 'both' && (!$image || !$video)) {
+        return response()->json(['success'=>false,'message'=>'Image et vidéo requises pour le mode both'], 422);
+    }
+
+    // ✅ MODIFIÉ : Calcul du prix et date_fin SEULEMENT si duree et date_debut sont fournis
+    $prix = null;
+    $dateFin = null;
+    $duree = $base['duree'] ?? null;
+    $dateDebut = $base['date_debut'] ?? null;
+    
+    if ($duree && $dateDebut) {
+        $calc = Publicite::calculerPrixEtDateFin($duree, $dateDebut);
+        $prix = $calc['prix'];
+        $dateFin = $calc['date_fin'];
+        \Log::info('Prix calculé:', ['duree' => $duree, 'prix' => $prix, 'date_fin' => $dateFin]);
+    } else {
+        \Log::info('⚠️ Création en brouillon sans durée/date (seront définis lors de l\'activation)');
+    }
+
+    $mediaEffective = $base['media_request'];
+    $dualUnlockCode = null;
+    $dualUnlockedAt = null;
+
+    if ($base['media_request'] === 'both') {
+        if ($request->filled('dual_unlock_code') && $this->isValidUnlockCode($request->input('dual_unlock_code'))) {
+            $dualUnlockCode = $request->input('dual_unlock_code');
+            $dualUnlockedAt = now();
+            $mediaEffective = 'both';
+        } else {
+            $mediaEffective = $image ? 'image' : 'video';
+        }
+    }
+
+    $pub = Publicite::create([
+        'titre'            => $request->input('titre'),
+        'description'      => $request->input('description'),
+        'image'            => $image,
+        'video'            => $video,
+        'lien_externe'     => $request->input('lien_externe'),
+        'type'             => $request->input('type','banniere'),
+        'media_request'    => $base['media_request'],
+        'media_effective'  => $mediaEffective,
+        'dual_unlock_code' => $dualUnlockCode,
+        'dual_unlocked_at' => $dualUnlockedAt,
+        'payment_status'   => 'unpaid',
+        'duree'            => $duree, // ✅ Peut être null
+        'prix'             => $prix, // ✅ Peut être null
+        'date_debut'       => $dateDebut, // ✅ Peut être null
+        'date_fin'         => $dateFin, // ✅ Peut être null
+        'entreprise_id'    => $entrepriseId,
+        'statut'           => 'brouillon', // ✅ Toujours brouillon à la création
+    ]);
+
+    \Log::info('✅ Publicité créée:', ['id' => $pub->id, 'entreprise_id' => $pub->entreprise_id]);
+
+    return response()->json(['success'=>true,'message'=>'Publicité créée','data'=>$pub], 201);
+}
 
     // GET /publicites/{id}
     public function show($id)

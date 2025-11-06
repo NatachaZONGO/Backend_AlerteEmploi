@@ -61,12 +61,11 @@ class Entreprise extends Model
     }
 
     /**
-     * ✅ Les offres de cette entreprise
-     * Via le recruteur (user_id de l'entreprise = recruteur_id des offres)
+     * ✅ MODIFIÉ : Les offres de cette entreprise (relation DIRECTE)
      */
     public function offres(): HasMany
     {
-        return $this->hasMany(Offre::class, 'recruteur_id', 'user_id');
+        return $this->hasMany(Offre::class, 'entreprise_id', 'id');
     }
 
     /**

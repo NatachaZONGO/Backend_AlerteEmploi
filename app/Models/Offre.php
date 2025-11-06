@@ -23,6 +23,7 @@ class Offre extends Model
         'date_publication',
         'date_expiration',
         'salaire',
+        'entreprise_id',
         'recruteur_id',
         'categorie_id',
         'motif_rejet',
@@ -52,7 +53,7 @@ class Offre extends Model
         return $this->belongsTo(Categorie::class);
     }
 
-   
+    
 
     public function validateur(): BelongsTo
     {
@@ -183,8 +184,8 @@ class Offre extends Model
     }
     
     
-    public function entreprise(): HasOne
+    public function entreprise(): BelongsTo
     {
-        return $this->hasOne(Entreprise::class, 'user_id', 'recruteur_id');
+        return $this->belongsTo(Entreprise::class, 'entreprise_id');
     }
 }
