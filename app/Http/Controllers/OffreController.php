@@ -9,7 +9,8 @@ use Carbon\Carbon;
 use App\Jobs\NotifyCandidatesOfOffer;
 use Illuminate\Support\Facades\DB;
 use App\Models\Notification;     
-use App\Models\Candidat;          
+use App\Models\Candidat;       
+use App\Models\Entreprise;
 use Illuminate\Support\Facades\Config; 
 
 class OffreController extends Controller
@@ -147,58 +148,167 @@ public function index(Request $request)
     if (!$user) {
         return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
     }
-    
-    \Log::info('📥 Données reçues:', $request->all());
-    
-    $validator = Validator::make($request->all(), [
-        'titre'            => 'required|string|max:255',
-        'description'      => 'required|string',
-        'experience'       => 'required|string|max:255',
-        'localisation'     => 'required|string|max:255',
-        'type_offre'       => 'required|in:emploi,stage',
-        'type_contrat'     => 'required|string|max:255',
-        'date_expiration'  => 'required|date|after:today',
-        'salaire'          => 'nullable|numeric|min:0',
-        'categorie_id'     => 'required|exists:categories,id',
-        'recruteur_id'     => 'required|integer|exists:users,id',
-        'entreprise_id'    => 'required|integer|exists:entreprises,id', // ✅ OBLIGATOIRE maintenant
+
+    // ✅ Gestion souple des rôles
+    $isAdmin        = $user->hasAnyRole(['administrateur', 'Administrateur']);
+    $isRecruteur    = $user->hasAnyRole(['recruteur', 'Recruteur']);
+    $isCommunityMgr = $user->hasAnyRole(['community_manager', 'Community Manager', 'community manager']);
+
+    if (!$isAdmin && !$isRecruteur && !$isCommunityMgr) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Vous n\'êtes pas autorisé à créer des offres'
+        ], 403);
+    }
+
+    \Log::info('📥 Création offre - Données reçues', [
+        'user_id' => $user->id,
+        'roles'   => $user->roles->pluck('nom')->toArray(),
+        'payload' => $request->all(),
     ]);
+
+    // ✅ RÈGLES COMMUNES
+    $rules = [
+        'titre'           => 'required|string|max:255',
+        'description'     => 'required|string',
+        'experience'      => 'required|string|max:255',
+        'localisation'    => 'required|string|max:255',
+        'type_offre'      => 'required|in:emploi,stage',
+        'type_contrat'    => 'required|string|max:255',
+        'date_expiration' => 'required|date|after:today',
+        'salaire'         => 'nullable|numeric|min:0',
+        'categorie_id'    => 'required|exists:categories,id',
+    ];
+
+    // 🟣 ADMIN : peut éventuellement préciser recruteur/entreprise, mais ce n'est pas obligatoire
+    if ($isAdmin) {
+        $rules['recruteur_id']  = 'nullable|integer|exists:users,id';
+        $rules['entreprise_id'] = 'nullable|integer|exists:entreprises,id';
+    }
+
+    // 🟡 COMMUNITY MANAGER : DOIT choisir une entreprise (CRI, SOBELEC, etc.)
+    if ($isCommunityMgr) {
+        $rules['entreprise_id'] = 'required|integer|exists:entreprises,id';
+        // on NE demande PAS recruteur_id au CM, on le déduira depuis l’entreprise
+    }
+
+    // 🔵 RECRUTEUR : on ne lui laisse pas choisir expo d’une autre entreprise, donc pas besoin de règles spéciales ici
+
+    $validator = Validator::make($request->all(), $rules);
 
     if ($validator->fails()) {
         return response()->json([
-            'success' => false, 
-            'message' => 'Erreurs de validation', 
-            'errors' => $validator->errors()
+            'success' => false,
+            'message' => 'Erreurs de validation',
+            'errors'  => $validator->errors()
         ], 422);
     }
 
-    // ✅ Récupérer les données TELLES QUELLES
-    $payload = $request->only([
-        'titre',
-        'description',
-        'experience',
-        'localisation',
-        'type_offre',
-        'type_contrat',
-        'date_expiration',
-        'salaire',
-        'categorie_id',
-        'recruteur_id',    // ✅ = 22 (le propriétaire de l'entreprise)
-        'entreprise_id',   // ✅ = 9 (SOBELEC)
-        'statut'
-    ]);
+    $data = $validator->validated();
 
-    $payload['statut'] = $payload['statut'] ?? 'brouillon';
-    
-    \Log::info('💾 Payload avant création:', $payload);
+    // ✅ BASE DU PAYLOAD
+    $payload = [
+        'titre'           => $data['titre'],
+        'description'     => $data['description'],
+        'experience'      => $data['experience'],
+        'localisation'    => $data['localisation'],
+        'type_offre'      => $data['type_offre'],
+        'type_contrat'    => $data['type_contrat'],
+        'date_expiration' => $data['date_expiration'],
+        'salaire'         => $data['salaire'] ?? null,
+        'categorie_id'    => $data['categorie_id'],
+        'statut'          => 'brouillon',
+    ];
 
-    // ✅ Créer l'offre
+    /**
+     * 🔐 CAS 1 : ADMIN
+     * - Peut laisser vide
+     * - Peut mettre juste entreprise_id
+     * - Peut mettre les 2
+     */
+    if ($isAdmin) {
+        $payload['recruteur_id']  = $data['recruteur_id']  ?? null;
+        $payload['entreprise_id'] = $data['entreprise_id'] ?? null;
+
+        // Si admin a mis une entreprise mais pas de recruteur → on déduit
+        if (!$payload['recruteur_id'] && $payload['entreprise_id']) {
+            $entreprise = Entreprise::find($payload['entreprise_id']);
+            if ($entreprise) {
+                $payload['recruteur_id'] = $entreprise->user_id;
+            }
+        }
+    }
+
+    /**
+     * 🔐 CAS 2 : RECRUTEUR
+     * - Toujours lié à SON entreprise
+     */
+    if ($isRecruteur) {
+        $payload['recruteur_id'] = $user->id;
+
+        // On récupère l’entreprise du recruteur
+        $entreprise = null;
+
+        if (property_exists($user, 'entreprise_id') && $user->entreprise_id) {
+            $entreprise = Entreprise::find($user->entreprise_id);
+        }
+
+        if (!$entreprise) {
+            // fallback : via relation getManageableEntreprises()
+            $entreprise = $user->getManageableEntreprises()->first();
+        }
+
+        if (!$entreprise) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Aucune entreprise associée à votre compte recruteur. Contactez un administrateur.'
+            ], 422);
+        }
+
+        $payload['entreprise_id'] = $entreprise->id;
+    }
+
+    /**
+     * 🔐 CAS 3 : COMMUNITY MANAGER
+     * - Peut gérer plusieurs entreprises
+     * - Doit choisir entreprise_id dans le front
+     * - On vérifie qu’il a bien accès à cette entreprise
+     * - On déduit recruteur_id depuis l’entreprise choisie
+     */
+    if ($isCommunityMgr) {
+        $entrepriseId = $data['entreprise_id'];
+
+        // Vérifier que le CM gère bien cette entreprise
+        $hasAccess = $user->entreprisesGerees()
+            ->where('entreprises.id', $entrepriseId)
+            ->exists();
+
+        if (!$hasAccess) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Vous n\'avez pas accès à cette entreprise'
+            ], 403);
+        }
+
+        $entreprise = Entreprise::find($entrepriseId);
+        if (!$entreprise) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Entreprise introuvable'
+            ], 422);
+        }
+
+        // ✅ ICI : on force les bons IDs
+        $payload['entreprise_id'] = $entreprise->id;      // CRI OU SOBELEC, selon le choix
+        $payload['recruteur_id']  = $entreprise->user_id; // propriétaire de l’entreprise
+    }
+
+    \Log::info('💾 Payload final avant création', $payload);
+
     $offre = Offre::create($payload);
-
-    \Log::info('✅ Offre créée:', $offre->toArray());
-
-    // ✅ Charger les relations
     $offre->load(['entreprise', 'categorie', 'recruteur']);
+
+    \Log::info('✅ Offre créée', $offre->toArray());
 
     return response()->json([
         'success' => true,
@@ -206,6 +316,7 @@ public function index(Request $request)
         'data'    => $offre
     ], 201);
 }
+
 
     /**
      * Mettre à jour une offre

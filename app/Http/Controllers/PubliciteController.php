@@ -85,6 +85,9 @@ class PubliciteController extends Controller
     /**
  * ✅ POST /publicites (Recruteur ET Community Manager)
  */
+/**
+ * ✅ POST /publicites (Admin, Recruteur ET Community Manager)
+ */
 public function store(Request $request)
 {
     $user = Auth::user();
@@ -97,22 +100,26 @@ public function store(Request $request)
     \Log::info('User:', ['id' => $user->id, 'roles' => $user->roles->pluck('nom')]);
     \Log::info('Données reçues:', $request->all());
     
-    // ✅ Vérifier que c'est un recruteur OU community manager
-    if (!$user->hasRole('recruteur') && !$user->hasRole('community_manager')) {
+    // ✅ MODIFIÉ : Autoriser Admin, Recruteur ET Community Manager
+    $isAdmin = $user->hasRole('administrateur');
+    $isRecruteur = $user->hasRole('recruteur');
+    $isCM = $user->hasRole('community_manager');
+    
+    if (!$isAdmin && !$isRecruteur && !$isCM) {
         return response()->json([
             'success' => false,
-            'message' => 'Seuls les recruteurs et community managers peuvent créer des publicités'
+            'message' => 'Seuls les administrateurs, recruteurs et community managers peuvent créer des publicités'
         ], 403);
     }
     
-    // ✅ MODIFIÉ : duree et date_debut sont maintenant OPTIONNELS à la création
+    // Validation
     $base = $request->validate([
         'titre'         => 'required|string|max:255',
         'description'   => 'nullable|string|max:10000',
         'lien_externe'  => 'nullable|url',
         'type'          => 'sometimes|in:banniere,sidebar,footer',
-        'duree'         => 'nullable|in:3,7,14,30,60,90', // ✅ OPTIONNEL
-        'date_debut'    => 'nullable|date', // ✅ OPTIONNEL (plus de after_or_equal)
+        'duree'         => 'nullable|in:3,7,14,30,60,90',
+        'date_debut'    => 'nullable|date',
         'media_request' => 'required|in:image,video,both',
         'dual_unlock_code' => 'nullable|string|min:6',
         'entreprise_id'      => 'nullable|integer|exists:entreprises,id',
@@ -121,36 +128,52 @@ public function store(Request $request)
         'user_id'            => 'nullable|integer|exists:users,id',
     ]);
 
-    // ✅ Résolution de l'entreprise
+    // ✅ RÉSOLUTION DE L'ENTREPRISE (différent selon le rôle)
     $entrepriseId = null;
-    $entrepriseId = $this->resolveEntrepriseId($request);
-    \Log::info('Entreprise résolue depuis params:', ['entreprise_id' => $entrepriseId]);
     
-    if (!$entrepriseId) {
-        $entreprises = $user->getManageableEntreprises();
-        \Log::info('Entreprises gérables:', ['count' => $entreprises->count(), 'ids' => $entreprises->pluck('id')]);
+    if ($isAdmin) {
+        // ✅ ADMIN : Peut spécifier n'importe quelle entreprise
+        $entrepriseId = $this->resolveEntrepriseId($request);
+        \Log::info('Admin - Entreprise résolue:', ['entreprise_id' => $entrepriseId]);
         
-        if ($entreprises->isEmpty()) {
+        if (!$entrepriseId) {
             return response()->json([
                 'success' => false,
-                'message' => 'Aucune entreprise disponible pour créer des publicités. Veuillez contacter l\'administrateur.'
+                'message' => 'Veuillez spécifier une entreprise (entreprise_id)'
             ], 422);
         }
+    } else {
+        // ✅ RECRUTEUR/CM : Résolution avec vérification des droits
+        $entrepriseId = $this->resolveEntrepriseId($request);
+        \Log::info('Recruteur/CM - Entreprise demandée:', ['entreprise_id' => $entrepriseId]);
         
-        $entrepriseId = $entreprises->first()->id;
-        \Log::info('Sélection première entreprise:', ['entreprise_id' => $entrepriseId]);
+        if (!$entrepriseId) {
+            // Si pas spécifié, prendre la première gérable
+            $entreprises = $user->getManageableEntreprises();
+            \Log::info('Entreprises gérables:', ['count' => $entreprises->count(), 'ids' => $entreprises->pluck('id')]);
+            
+            if ($entreprises->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aucune entreprise disponible. Veuillez contacter l\'administrateur.'
+                ], 422);
+            }
+            
+            $entrepriseId = $entreprises->first()->id;
+            \Log::info('Sélection première entreprise:', ['entreprise_id' => $entrepriseId]);
+        } else {
+            // ✅ Vérifier les droits sur l'entreprise demandée
+            if (!$user->canManageEntreprise($entrepriseId)) {
+                \Log::warning('Accès refusé à l\'entreprise:', ['entreprise_id' => $entrepriseId, 'user_id' => $user->id]);
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Vous n\'avez pas accès à cette entreprise'
+                ], 403);
+            }
+        }
     }
     
     \Log::info('Entreprise finale:', ['entreprise_id' => $entrepriseId]);
-    
-    // ✅ Vérifier les droits sur l'entreprise
-    if (!$user->canManageEntreprise($entrepriseId)) {
-        \Log::warning('Accès refusé à l\'entreprise:', ['entreprise_id' => $entrepriseId, 'user_id' => $user->id]);
-        return response()->json([
-            'success' => false,
-            'message' => 'Vous n\'avez pas accès à cette entreprise'
-        ], 403);
-    }
 
     // Initialiser
     $image = null;
@@ -187,7 +210,7 @@ public function store(Request $request)
         return response()->json(['success'=>false,'message'=>'Image et vidéo requises pour le mode both'], 422);
     }
 
-    // ✅ MODIFIÉ : Calcul du prix et date_fin SEULEMENT si duree et date_debut sont fournis
+    // Calcul du prix et date_fin
     $prix = null;
     $dateFin = null;
     $duree = $base['duree'] ?? null;
@@ -228,17 +251,17 @@ public function store(Request $request)
         'dual_unlock_code' => $dualUnlockCode,
         'dual_unlocked_at' => $dualUnlockedAt,
         'payment_status'   => 'unpaid',
-        'duree'            => $duree, // ✅ Peut être null
-        'prix'             => $prix, // ✅ Peut être null
-        'date_debut'       => $dateDebut, // ✅ Peut être null
-        'date_fin'         => $dateFin, // ✅ Peut être null
+        'duree'            => $duree,
+        'prix'             => $prix,
+        'date_debut'       => $dateDebut,
+        'date_fin'         => $dateFin,
         'entreprise_id'    => $entrepriseId,
-        'statut'           => 'brouillon', // ✅ Toujours brouillon à la création
+        'statut'           => 'brouillon',
     ]);
 
     \Log::info('✅ Publicité créée:', ['id' => $pub->id, 'entreprise_id' => $pub->entreprise_id]);
 
-    return response()->json(['success'=>true,'message'=>'Publicité créée','data'=>$pub], 201);
+    return response()->json(['success'=>true,'message'=>'Publicité créée','data'=>$pub->load('entreprise')], 201);
 }
 
     // GET /publicites/{id}
@@ -259,7 +282,19 @@ public function store(Request $request)
         if (!$user) {
             return response()->json(['success' => false, 'message' => 'Non authentifié'], 401);
         }
-        
+
+        $isAdmin = $user->hasRole('administrateur');
+    
+        if (!$isAdmin) {
+            // ✅ Pour Recruteur/CM : vérifier les droits sur l'entreprise
+            if (!$user->canManageEntreprise($pub->entreprise_id)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Vous n\'êtes pas autorisé à modifier cette publicité'
+                ], 403);
+            }
+        }
+            
         // ✅ Vérifier les droits sur l'entreprise de la publicité
         if (!$user->canManageEntreprise($pub->entreprise_id)) {
             return response()->json([
